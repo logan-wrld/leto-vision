@@ -1,6 +1,63 @@
-yolov4.cfg
-yolov4.weights# YOLO Model Files - Too large for GitHub
+# First, let's create a comprehensive .gitignore
+cat >> .gitignore << EOF
+
+# YOLO Model Files - Too large for GitHub (245MB each)
+# Users should download these using the wget commands in launchers
 *.weights
 yolov4.weights
 yolov4.cfg
 coco.names
+
+# Python cache files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Detection output folders
+detections/
+saved_frames/
+
+# Configuration files with sensitive info
+detection_config.json
+
+# Temporary files
+*.tmp
+*.log
+telemetry.txt
+frame_*.jpg
+EOF
+
+# Remove all the large files from git tracking
+git rm --cached yolov4.weights
+git rm --cached yolov4.cfg  
+git rm --cached coco.names
+git rm --cached simple/yolov4.weights
+git rm --cached simple/yolov4.cfg
+git rm --cached simple/coco.names
+git rm --cached terminal/yolov4.weights
+git rm --cached terminal/yolov4.cfg
+git rm --cached terminal/coco.names
+
+# Remove Python cache files
+git rm --cached -r __pycache__/
+git rm --cached -r simple/__pycache__/
+git rm --cached -r terminal/__pycache__/
+
+# Remove config file with potentially sensitive stream URLs
+git rm --cached detection_config.json
+
+# Add the updated .gitignore
+git add .gitignore
+
+# Commit the cleanup
+git commit -m "Clean up repository - remove large YOLO files and cache
+
+- Remove all YOLO weights/config files (245MB each) from git tracking
+- Add comprehensive .gitignore for YOLO files, Python cache, outputs
+- Users can download YOLO files using wget commands in launchers
+- Keeps repository lightweight and GitHub-compliant"
+
+# Push the cleaned up repository
+git push origin main
