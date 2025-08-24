@@ -1,2 +1,6 @@
 yolov4.cfg
+yolov4.weights# YOLO Model Files - Too large for GitHub
+*.weights
 yolov4.weights
+yolov4.cfg
+coco.names
