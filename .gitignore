@@ -14,6 +14,8 @@ __pycache__/
 *.pyo
 *.pyd
 .Python
+/__pycache__
+terminal/__pycache__
 
 # Detection output folders
 detections/
