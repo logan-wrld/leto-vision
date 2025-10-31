@@ -17,7 +17,7 @@ class SimpleCamera:
         self.stream_url = stream_url
         self.resolution = resolution
         self.width, self.height = map(int, resolution.split('x'))
-        self.frame_queue = queue.Queue(maxsize=3)
+        self.frame_queue = queue.Queue(maxsize=10)
         self.process = None
         self.thread = None
         self.running = False
@@ -30,7 +30,7 @@ class SimpleCamera:
                 'ffmpeg', '-i', self.stream_url,
                 '-f', 'rawvideo', '-pix_fmt', 'bgr24',
                 '-vf', f'scale={self.width}:{self.height}',
-                '-r', '15', '-an', '-sn', '-loglevel', 'error', '-'
+                '-an', '-sn', '-loglevel', 'error', '-'
             ]
             
             self.process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -111,10 +111,10 @@ class SimpleDetector:
                 self.net.setPreferableBackend(cv2.dnn.DNN_BACKEND_CUDA)
                 self.net.setPreferableTarget(cv2.dnn.DNN_TARGET_CUDA)
             
-            print(f"✅ Model loaded: {len(self.classes)} classes")
+            print(f"SUCCESS: Model loaded: {len(self.classes)} classes")
             return True
         except Exception as e:
-            print(f"❌ Model load failed: {e}")
+            print(f"ERROR: Model load failed: {e}")
             return False
     
     def detect(self, frame):
