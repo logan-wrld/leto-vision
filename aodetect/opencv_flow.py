@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-RAFT Optical Flow Integration for Aerial Object Detection
-High-quality dense optical flow for detecting small motions
+Pure OpenCV Optical Flow for Aerial Object Detection
+High-quality dense optical flow without PyTorch dependencies
 """
 
 import cv2
@@ -9,27 +9,14 @@ import numpy as np
 from collections import deque
 import time
 
-# Check for PyTorch and torchvision availability
-try:
-    import torch
-    import torch.nn.functional as F
-    import torchvision.transforms as transforms
-    PYTORCH_AVAILABLE = True
-    RAFT_AVAILABLE = True
-except ImportError:
-    PYTORCH_AVAILABLE = False
-    RAFT_AVAILABLE = False
-    print("Warning: PyTorch/torchvision not available. Using OpenCV optical flow only.")
 
-
-class RAFTFlowDetector:
-    """Dense optical flow detector optimized for aerial object detection"""
+class OpenCVFlowDetector:
+    """Pure OpenCV dense optical flow detector optimized for aerial object detection"""
     
-    def __init__(self, use_gpu=True, flow_threshold=1.0):
+    def __init__(self, flow_threshold=1.0):
         """
         Initialize flow detector
         Args:
-            use_gpu: Use GPU acceleration if available (currently unused for OpenCV)
             flow_threshold: Minimum flow magnitude to consider as motion
         """
         self.flow_threshold = flow_threshold
@@ -39,12 +26,11 @@ class RAFTFlowDetector:
         self.motion_accumulator = None
         self.accumulation_decay = 0.95
         
-        # Use OpenCV dense optical flow (more reliable than RAFT for this use case)
         print("Using OpenCV Farneback dense optical flow for motion detection")
         print(f"Flow threshold: {flow_threshold} pixels")
     
     def preprocess_frame(self, frame):
-        """Preprocess frame for RAFT"""
+        """Preprocess frame for optical flow"""
         if frame is None:
             return None
             
@@ -58,14 +44,8 @@ class RAFTFlowDetector:
     
     def compute_dense_flow(self, frame1, frame2):
         """Compute dense optical flow using OpenCV Farneback method"""
-        return self.compute_opencv_flow(frame1, frame2)
-    
-
-    
-    def compute_opencv_flow(self, frame1, frame2):
-        """Fallback optical flow using OpenCV Farneback dense flow"""
         try:
-            # Use Farneback dense optical flow directly
+            # Use Farneback dense optical flow
             dense_flow = cv2.calcOpticalFlowFarneback(
                 frame1, frame2, None, 
                 pyr_scale=0.5,      # Pyramid scale factor
@@ -77,7 +57,7 @@ class RAFTFlowDetector:
                 flags=0
             )
             
-            # Convert from HWC to CHW format for consistency with RAFT
+            # Convert from HWC to CHW format for consistency
             if dense_flow is not None and len(dense_flow.shape) == 3:
                 return np.transpose(dense_flow, (2, 0, 1))  # HWC -> CHW
             else:

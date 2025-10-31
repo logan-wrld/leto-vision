@@ -8,9 +8,10 @@ Optimized for reducing false positives while detecting genuine objects
 import cv2
 import numpy as np
 import time
+from collections import deque
 from aerial_object_detector import AerialObjectDetector, TrackedObject
 from simple_camera import SimpleCamera
-from raft_flow import RAFTFlowDetector, OpticalFlowTracker
+from opencv_flow import OpenCVFlowDetector, OpticalFlowTracker
 import argparse
 import json
 from datetime import datetime
@@ -29,8 +30,8 @@ class AerialDetectionSystem:
         self.camera = SimpleCamera(camera_source, resolution)
         self.detector = AerialObjectDetector(min_confidence=0.6)
         
-        # RAFT Optical Flow Integration
-        self.flow_detector = RAFTFlowDetector(use_gpu=True, flow_threshold=1.5)
+        # OpenCV Dense Optical Flow Integration
+        self.flow_detector = OpenCVFlowDetector(flow_threshold=1.5)
         self.flow_tracker = OpticalFlowTracker(max_distance=60)
         self.enable_optical_flow = True
         self.show_optical_flow = False
@@ -271,7 +272,7 @@ class AerialDetectionSystem:
         stats = [
             ("Camera FPS", f"{self.camera.get_fps():.1f}"),
             ("Processing", f"{self.avg_process_time:.1f}ms"),
-            ("RAFT Flow", f"{'ON' if self.enable_optical_flow else 'OFF'}"),
+            ("Dense Flow", f"{'ON' if self.enable_optical_flow else 'OFF'}"),
             ("", ""),  # Separator
             ("Active Objects", f"{len([o for o in self.detector.tracked_objects.values() if o.is_validated])}"),
             ("Flow Tracks", f"{flow_tracks}"),
@@ -354,7 +355,7 @@ class AerialDetectionSystem:
         print("  +/-: Adjust brightness threshold")
         print("  [/]: Adjust minimum confidence")
         print("  p: Take screenshot")
-        print("  f: Toggle RAFT optical flow detection")
+        print("  f: Toggle dense optical flow detection")
         print("  o: Toggle optical flow visualization")
         print("  m/n: Increase/decrease flow sensitivity")
         print("=" * 50)
@@ -547,7 +548,7 @@ class AerialDetectionSystem:
                 elif key == ord('f'):
                     # Toggle optical flow
                     self.enable_optical_flow = not self.enable_optical_flow
-                    print(f"Optical Flow Detection: {'ON' if self.enable_optical_flow else 'OFF'}")
+                    print(f"Dense Optical Flow Detection: {'ON' if self.enable_optical_flow else 'OFF'}")
                     
                 elif key == ord('o'):
                     # Toggle optical flow visualization

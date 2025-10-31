@@ -5,6 +5,8 @@ yolov4.weights
 yolov4.cfg
 coco.names
 
+
+
 # Python cache files
 __pycache__/
 *.pyc
@@ -29,3 +31,15 @@ frame_*.jpg
 
 terminal/__pycache__
 __pycache__
+
+*.weights
+*.pt
+*.onnx
+*.h5
+*.ckpt
+*.tflite
+*.npz
+*.npy
+*.tar
+*.zip
+*.gz
