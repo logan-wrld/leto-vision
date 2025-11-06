@@ -55,6 +55,15 @@ class AerialDetectionSystem:
         self.recording = False
         self.video_writer = None
         
+        # Auto-recording feature
+        self.auto_record = True  # Enable auto-recording by default
+        self.auto_recording = False
+        self.auto_record_start_time = None
+        self.auto_record_filename = None
+        self.auto_record_buffer_duration = 30.0  # Record for 30 seconds after detection
+        self.auto_record_had_detection = False
+        self.pending_auto_recordings = []  # Track recordings waiting for validation
+        
         # Detection log
         self.detection_log = []
         self.log_file = None
@@ -63,6 +72,18 @@ class AerialDetectionSystem:
         self.process_times = []
         self.max_process_time = 0
         self.avg_process_time = 0
+        
+        # Create output directories for recordings and logs
+        self.output_dir = "detections_output"
+        self.videos_dir = f"{self.output_dir}/videos"
+        self.logs_dir = f"{self.output_dir}/logs"
+        self.screenshots_dir = f"{self.output_dir}/screenshots"
+        
+        # Ensure directories exist
+        import os
+        os.makedirs(self.videos_dir, exist_ok=True)
+        os.makedirs(self.logs_dir, exist_ok=True)
+        os.makedirs(self.screenshots_dir, exist_ok=True)
         
     def merge_detections(self, brightness_objects, flow_objects):
         """Merge brightness-based and optical flow detections"""
@@ -156,106 +177,85 @@ class AerialDetectionSystem:
         # Different highlighting for large vs small objects
         avg_area = np.mean(list(obj.area_history)) if len(obj.area_history) > 0 else 5
         
-        if avg_area >= 10:  # Large isolated objects
-            # Draw thicker rectangle for large objects
-            rect_size = int(15 + obj.confidence * 20)
-            cv2.rectangle(frame, 
-                         (current_pos[0] - rect_size, current_pos[1] - rect_size),
-                         (current_pos[0] + rect_size, current_pos[1] + rect_size),
-                         color, 3)
-            # Add corner markers for emphasis
-            cv2.line(frame, (current_pos[0] - rect_size, current_pos[1] - rect_size),
-                    (current_pos[0] - rect_size + 8, current_pos[1] - rect_size), color, 3)
-            cv2.line(frame, (current_pos[0] - rect_size, current_pos[1] - rect_size),
-                    (current_pos[0] - rect_size, current_pos[1] - rect_size + 8), color, 3)
-        else:  # Small navigation lights
-            # Draw circle for small objects
-            circle_size = int(10 + obj.confidence * 15)
-            cv2.circle(frame, current_pos, circle_size, color, 2)
+        # Simple box markers only
+        rect_size = 15
+        line_thickness = 2 if obj.is_validated else 1
         
-        # Center dot
-        cv2.circle(frame, current_pos, 3, color, -1)
+        # Draw simple rectangle around object
+        cv2.rectangle(frame, 
+                     (current_pos[0] - rect_size, current_pos[1] - rect_size),
+                     (current_pos[0] + rect_size, current_pos[1] + rect_size),
+                     color, line_thickness)
         
-        # Draw information box
-        if self.show_detection_boxes:
-            # Background for text
-            text = f"{obj.classification.replace('_', ' ').title()}"
-            conf_text = f"Conf: {obj.confidence:.2f}"
-            speed_text = f"Speed: {obj.average_speed:.1f} px/s"
-            size_text = f"Size: {avg_area:.0f} px" if avg_area >= 10 else f"Light: {avg_area:.0f} px"
+        # Clean display - no extra text or badges around objects
+        
+        # Draw direction arrow if moving
+        if obj.average_speed > 2 and len(obj.positions) >= 3:
+            # Calculate direction from last few positions
+            recent_pos = list(obj.positions)[-3:]
+            dx = recent_pos[-1][0] - recent_pos[0][0]
+            dy = recent_pos[-1][1] - recent_pos[0][1]
             
-            # Calculate text sizes
-            font = cv2.FONT_HERSHEY_SIMPLEX
-            font_scale = 0.5
-            thickness = 1
-            
-            (text_w, text_h), _ = cv2.getTextSize(text, font, font_scale, thickness)
-            
-            # Draw semi-transparent background (larger for size info)
-            box_x = current_pos[0] + 20
-            box_y = current_pos[1] - 25
-            box_w = max(text_w, 140)
-            box_h = 65
-            
-            overlay = frame.copy()
-            cv2.rectangle(overlay, (box_x, box_y), (box_x + box_w, box_y + box_h), (0, 0, 0), -1)
-            cv2.addWeighted(overlay, 0.5, frame, 0.5, 0, frame)
-            
-            # Draw text
-            cv2.putText(frame, text, (box_x + 5, box_y + 15), font, font_scale, color, thickness)
-            cv2.putText(frame, conf_text, (box_x + 5, box_y + 30), font, 0.4, (200, 200, 200), 1)
-            cv2.putText(frame, speed_text, (box_x + 5, box_y + 45), font, 0.4, (200, 200, 200), 1)
-            cv2.putText(frame, size_text, (box_x + 5, box_y + 60), font, 0.4, (200, 200, 200), 1)
-            
-            # Draw direction arrow if moving
-            if obj.average_speed > 2 and len(obj.positions) >= 3:
-                # Calculate direction from last few positions
-                recent_pos = list(obj.positions)[-3:]
-                dx = recent_pos[-1][0] - recent_pos[0][0]
-                dy = recent_pos[-1][1] - recent_pos[0][1]
-                
-                if abs(dx) > 1 or abs(dy) > 1:
-                    angle = np.arctan2(dy, dx)
-                    arrow_length = 30
-                    arrow_end = (
-                        int(current_pos[0] + arrow_length * np.cos(angle)),
-                        int(current_pos[1] + arrow_length * np.sin(angle))
-                    )
-                    cv2.arrowedLine(frame, current_pos, arrow_end, color, 2, tipLength=0.3)
+            if abs(dx) > 1 or abs(dy) > 1:
+                angle = np.arctan2(dy, dx)
+                arrow_length = 30
+                arrow_end = (
+                    int(current_pos[0] + arrow_length * np.cos(angle)),
+                    int(current_pos[1] + arrow_length * np.sin(angle))
+                )
+                cv2.arrowedLine(frame, current_pos, arrow_end, color, 2, tipLength=0.3)
     
     def draw_stats_panel(self, frame: np.ndarray):
-        """Draw enhanced statistics panel"""
+        """Draw military-style HUD statistics panel"""
         
         if not self.show_stats:
             return
         
         height, width = frame.shape[:2]
         
-        # Create larger stats panel
-        panel_width = 280
-        panel_height = 200
+        # Military-style HUD panel - larger and more prominent
+        panel_width = 380
+        panel_height = 320
         panel_x = width - panel_width - 10
         panel_y = 10
         
-        # Semi-transparent black background
+        # Dark military green background with higher opacity
         overlay = frame.copy()
         cv2.rectangle(overlay, (panel_x, panel_y), 
                      (panel_x + panel_width, panel_y + panel_height), 
-                     (0, 0, 0), -1)
-        cv2.addWeighted(overlay, 0.7, frame, 0.3, 0, frame)
+                     (0, 20, 0), -1)  # Dark green
+        cv2.addWeighted(overlay, 0.9, frame, 0.1, 0, frame)
         
-        # Border
+        # Military green border with corner brackets
+        military_green = (0, 255, 0)
         cv2.rectangle(frame, (panel_x, panel_y), 
                      (panel_x + panel_width, panel_y + panel_height), 
-                     (0, 255, 0), 1)
+                     military_green, 2)
         
-        # Title
-        cv2.putText(frame, "Object in sky?", (panel_x + 10, panel_y + 25),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+        # Corner brackets for military HUD look
+        bracket_size = 15
+        # Top-left corner
+        cv2.line(frame, (panel_x, panel_y), (panel_x + bracket_size, panel_y), military_green, 3)
+        cv2.line(frame, (panel_x, panel_y), (panel_x, panel_y + bracket_size), military_green, 3)
+        # Top-right corner
+        cv2.line(frame, (panel_x + panel_width, panel_y), (panel_x + panel_width - bracket_size, panel_y), military_green, 3)
+        cv2.line(frame, (panel_x + panel_width, panel_y), (panel_x + panel_width, panel_y + bracket_size), military_green, 3)
+        # Bottom-left corner
+        cv2.line(frame, (panel_x, panel_y + panel_height), (panel_x + bracket_size, panel_y + panel_height), military_green, 3)
+        cv2.line(frame, (panel_x, panel_y + panel_height), (panel_x, panel_y + panel_height - bracket_size), military_green, 3)
+        # Bottom-right corner
+        cv2.line(frame, (panel_x + panel_width, panel_y + panel_height), (panel_x + panel_width - bracket_size, panel_y + panel_height), military_green, 3)
+        cv2.line(frame, (panel_x + panel_width, panel_y + panel_height), (panel_x + panel_width, panel_y + panel_height - bracket_size), military_green, 3)
         
-        # Separator
-        cv2.line(frame, (panel_x + 10, panel_y + 35), 
-                (panel_x + panel_width - 10, panel_y + 35), (0, 255, 0), 1)
+        # Military HUD header
+        cv2.putText(frame, "AERIAL SURVEILLANCE", (panel_x + 20, panel_y + 25),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, military_green, 2)
+        cv2.putText(frame, "SYSTEM ACTIVE", (panel_x + 20, panel_y + 45),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 200, 0), 1)
+        
+        # Divider line
+        cv2.line(frame, (panel_x + 20, panel_y + 55), 
+                (panel_x + panel_width - 20, panel_y + 55), military_green, 1)
         
         # Count active objects by type
         object_counts = {}
@@ -264,50 +264,193 @@ class AerialDetectionSystem:
                 obj_type = obj.classification
                 object_counts[obj_type] = object_counts.get(obj_type, 0) + 1
         
-        # Stats
-        y_offset = panel_y + 55
+        # Start data display
+        y_offset = panel_y + 75
         
-        # System stats including optical flow
+        # System stats - military style
         flow_tracks = len(self.flow_tracker.tracked_objects) if hasattr(self, 'flow_tracker') else 0
+        
+        # Recording status with military terminology
+        rec_status = "STANDBY"
+        rec_color = (100, 100, 100)
+        if self.recording:
+            rec_status = "MANUAL REC"
+            rec_color = (0, 0, 255)
+        elif self.auto_recording:
+            rec_status = "AUTO REC"
+            rec_color = (255, 165, 0)
+        
+        # Military-style stats with abbreviated labels
         stats = [
-            ("Camera FPS", f"{self.camera.get_fps():.1f}"),
-            ("Processing", f"{self.avg_process_time:.1f}ms"),
-            ("Dense Flow", f"{'ON' if self.enable_optical_flow else 'OFF'}"),
+            ("SYS", f"FPS {self.camera.get_fps():.0f} | {self.avg_process_time:.0f}MS"),
+            ("OPT", f"FLOW {'ACTIVE' if self.enable_optical_flow else 'OFF'}"),
+            ("REC", rec_status),
             ("", ""),  # Separator
-            ("Active Objects", f"{len([o for o in self.detector.tracked_objects.values() if o.is_validated])}"),
-            ("Flow Tracks", f"{flow_tracks}"),
-            ("Total Validated", f"{self.detector.validated_objects}"),
-            ("Noise Filtered", f"{self.detector.false_positives_filtered}"),
+            ("TGT", f"ACTIVE: {len([o for o in self.detector.tracked_objects.values() if o.is_validated])}"),
+            ("TRK", f"TRACKS: {flow_tracks}"),
+            ("CNF", f"VALID: {self.detector.validated_objects}"),
+            ("FLT", f"NOISE: {self.detector.false_positives_filtered}"),
+            ("", ""),  # Separator
+            ("MOD", f"AUTO-REC {'ENABLED' if self.auto_record else 'DISABLED'}"),
         ]
         
         for label, value in stats:
             if label:  # Skip empty lines
-                cv2.putText(frame, f"{label}:", (panel_x + 15, y_offset),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1)
-                cv2.putText(frame, value, (panel_x + 150, y_offset),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1)
-            y_offset += 20
+                cv2.putText(frame, f"{label}:", (panel_x + 25, y_offset),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, military_green, 1)
+                
+                # Special color for recording status
+                if label == "REC":
+                    cv2.putText(frame, value, (panel_x + 80, y_offset),
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.5, rec_color, 2)
+                else:
+                    cv2.putText(frame, value, (panel_x + 80, y_offset),
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+            else:
+                # Add small spacing for separator
+                y_offset += 8
+            y_offset += 24
         
-        # Object type breakdown
+        # Military-style threat assessment
         if object_counts:
+            # Threat level header
+            cv2.line(frame, (panel_x + 20, y_offset), 
+                    (panel_x + panel_width - 20, y_offset), military_green, 1)
             y_offset += 10
-            cv2.putText(frame, "Object Types:", (panel_x + 15, y_offset),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1)
-            y_offset += 15
+            cv2.putText(frame, "THREAT ASSESSMENT:", (panel_x + 25, y_offset),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.45, military_green, 1)
+            y_offset += 20
             
             for obj_type, count in sorted(object_counts.items()):
-                display_name = obj_type.replace('_', ' ').title()
-                cv2.putText(frame, f"  {display_name}: {count}", 
-                           (panel_x + 20, y_offset),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.35, (150, 150, 255), 1)
-                y_offset += 15
+                # Military classifications
+                if 'aircraft' in obj_type:
+                    threat_name = "AIRCRAFT"
+                    threat_color = (0, 255, 255)  # Cyan for aircraft
+                elif 'light' in obj_type:
+                    threat_name = "NAV-LIGHT"
+                    threat_color = (255, 255, 0)  # Yellow for lights
+                elif 'flow' in obj_type:
+                    threat_name = "MOTION-TGT"
+                    threat_color = (255, 0, 255)  # Magenta for optical flow
+                else:
+                    threat_name = "UNKNOWN"
+                    threat_color = (255, 255, 255)  # White for unknown
+                
+                cv2.putText(frame, f"{threat_name}", (panel_x + 30, y_offset),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.45, threat_color, 1)
+                cv2.putText(frame, f"x{count}", (panel_x + 280, y_offset),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, threat_color, 2)
+                y_offset += 20
         
-        # Recording indicator
+        # Military-style status indicators in top-right
         if self.recording:
-            cv2.circle(frame, (panel_x + panel_width - 20, panel_y + 20), 8, (0, 0, 255), -1)
-            cv2.putText(frame, "REC", (panel_x + panel_width - 60, panel_y + 25),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
+            cv2.rectangle(frame, (panel_x + panel_width - 90, panel_y + 10), 
+                         (panel_x + panel_width - 10, panel_y + 35), (0, 0, 255), 2)
+            cv2.putText(frame, "MANUAL", (panel_x + panel_width - 85, panel_y + 28),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 255), 2)
+        elif self.auto_recording:
+            cv2.rectangle(frame, (panel_x + panel_width - 90, panel_y + 10), 
+                         (panel_x + panel_width - 10, panel_y + 35), (255, 165, 0), 2)
+            cv2.putText(frame, "AUTO-REC", (panel_x + panel_width - 88, panel_y + 28),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.35, (255, 165, 0), 2)
+
+    def draw_military_hud_elements(self, frame: np.ndarray):
+        """Draw military-style HUD elements"""
+        height, width = frame.shape[:2]
+        military_green = (0, 255, 0)
+        
+        
+        # Validation indicator (top center)
+        validated_count = len([o for o in self.detector.tracked_objects.values() if o.is_validated])
+        tracking_count = len([o for o in self.detector.tracked_objects.values() if not o.is_validated and not o.is_noise])
+        
+        status_x = width // 2 - 100
+        cv2.putText(frame, f"VALIDATED: {validated_count}", (status_x, 25),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+        cv2.putText(frame, f"TRACKING: {tracking_count}", (status_x, 50),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
     
+    def start_auto_recording(self, frame):
+        """Start auto-recording when motion is detected"""
+        if self.auto_recording or not self.auto_record:
+            return
+            
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S_%f')[:-3]  # Include milliseconds
+        self.auto_record_filename = f"{self.videos_dir}/auto_detection_{timestamp}.mp4"
+        
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        fps = 30
+        frame_size = (frame.shape[1], frame.shape[0])
+        self.video_writer = cv2.VideoWriter(self.auto_record_filename, fourcc, fps, frame_size)
+        
+        self.auto_recording = True
+        self.auto_record_start_time = time.time()
+        self.auto_record_had_detection = False
+        
+        print(f"Auto-recording started: {self.auto_record_filename}")
+    
+    def stop_auto_recording(self):
+        """Stop auto-recording and decide whether to keep or delete the file"""
+        if not self.auto_recording or not self.video_writer:
+            return
+            
+        # Close video writer
+        self.video_writer.release()
+        self.video_writer = None
+        
+        if self.auto_record_had_detection:
+            # Keep the recording - there was a positive detection
+            print(f"Auto-recording saved: {self.auto_record_filename} (Positive detection found)")
+            # Add to pending list for potential cleanup later
+            self.pending_auto_recordings.append({
+                'filename': self.auto_record_filename,
+                'timestamp': time.time(),
+                'had_detection': True
+            })
+        else:
+            # Delete the recording - no positive detection
+            try:
+                import os
+                if os.path.exists(self.auto_record_filename):
+                    os.remove(self.auto_record_filename)
+                print(f"Auto-recording deleted: {self.auto_record_filename} (No detection found)")
+            except Exception as e:
+                print(f"Warning: Could not delete auto-recording {self.auto_record_filename}: {e}")
+        
+        self.auto_recording = False
+        self.auto_record_start_time = None
+        self.auto_record_filename = None
+    
+    def check_auto_recording_timeout(self):
+        """Check if auto-recording should timeout"""
+        if (self.auto_recording and 
+            self.auto_record_start_time and 
+            time.time() - self.auto_record_start_time > self.auto_record_buffer_duration):
+            self.stop_auto_recording()
+    
+    def cleanup_old_auto_recordings(self):
+        """Clean up old auto-recordings to prevent disk space issues"""
+        import os
+        current_time = time.time()
+        cleanup_age = 3600  # 1 hour
+        
+        recordings_to_remove = []
+        for recording in self.pending_auto_recordings:
+            if current_time - recording['timestamp'] > cleanup_age:
+                # Only delete recordings without detections that are old
+                if not recording['had_detection']:
+                    try:
+                        if os.path.exists(recording['filename']):
+                            os.remove(recording['filename'])
+                        print(f"Cleaned up old auto-recording: {recording['filename']}")
+                    except Exception as e:
+                        print(f"Warning: Could not clean up {recording['filename']}: {e}")
+                recordings_to_remove.append(recording)
+        
+        # Remove cleaned recordings from pending list
+        for recording in recordings_to_remove:
+            self.pending_auto_recordings.remove(recording)
+
     def log_detection(self, obj: TrackedObject):
         """Log detection to file"""
         
@@ -326,6 +469,10 @@ class AerialDetectionSystem:
         
         self.detection_log.append(detection_info)
         
+        # Mark that we had a positive detection for auto-recording
+        if self.auto_recording:
+            self.auto_record_had_detection = True
+        
         # Write to log file if open
         if self.log_file:
             self.log_file.write(json.dumps(detection_info) + '\n')
@@ -334,39 +481,40 @@ class AerialDetectionSystem:
     def run(self):
         """Main processing loop"""
         
-        print("Starting Aerial Detection System...")
-        print("=" * 50)
+        print("=" * 60)
+        print("AERIAL OBJECT DETECTION SYSTEM v2.0")
+        print("=" * 60)
         
         # Start camera
         if not self.camera.start():
             print("ERROR: Failed to start camera!")
             return
         
-        print("Camera connected successfully")
-        print("\nCONTROLS:")
-        print("  q: Quit")
-        print("  t: Toggle trails")
-        print("  s: Toggle stats panel")
-        print("  b: Toggle detection boxes")
-        print("  d: Toggle debug mode (show filtered objects)")
-        print("  r: Start/stop recording")
-        print("  l: Save detection log")
-        print("  c: Clear all detections")
-        print("  +/-: Adjust brightness threshold")
-        print("  [/]: Adjust minimum confidence")
-        print("  p: Take screenshot")
-        print("  f: Toggle dense optical flow detection")
-        print("  o: Toggle optical flow visualization")
-        print("  m/n: Increase/decrease flow sensitivity")
-        print("=" * 50)
+
+        print("  [Q] System Shutdown")
+        print("  [T] Target Trails")
+        print("  [S] HUD Display")
+        print("  [B] Target Boxes")
+        print("  [D] Debug Mode")
+        print("  [R] Manual Recording")
+        print("  [A] Auto-Record Mode")
+        print("  [L] Export Log")
+        print("  [C] Clear Contacts")
+        print("  [+/-] Sensitivity")
+        print("  [[/]] Confidence")
+        print("  [P] Screenshot")
+        print("  [F] Optical Flow")
+        print("  [O] Flow Overlay")
+        print("  [M/N] Flow Tuning")
+        print("=" * 60)
         
-        # Create window
-        window_name = 'Aerial Object Detection System'
+        # Create window - larger default size with military title
+        window_name = 'TACTICAL AERIAL SURVEILLANCE SYSTEM'
         cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
-        cv2.resizeWindow(window_name, 1280, 720)
+        cv2.resizeWindow(window_name, 1600, 900)
         
         # Open log file
-        log_filename = f"detections_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jsonl"
+        log_filename = f"{self.logs_dir}/detections_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jsonl"
         self.log_file = open(log_filename, 'w')
         print(f"\nLogging detections to: {log_filename}")
         
@@ -382,6 +530,10 @@ class AerialDetectionSystem:
                     continue
                 
                 frame_count += 1
+                
+                # Periodic cleanup of old auto-recordings (every 1000 frames)
+                if frame_count % 1000 == 0:
+                    self.cleanup_old_auto_recordings()
                 
                 try:
                     # Process frame with both brightness detection and optical flow
@@ -408,6 +560,18 @@ class AerialDetectionSystem:
                     self.avg_process_time = np.mean(self.process_times)
                     self.max_process_time = max(self.max_process_time, process_time)
                     
+                    # Check for motion to trigger auto-recording
+                    has_current_motion = (len(validated_objects) > 0 or 
+                                        (self.enable_optical_flow and len(flow_objects) > 0))
+                    
+                    # Auto-recording logic
+                    if self.auto_record and not self.auto_recording and has_current_motion:
+                        self.start_auto_recording(frame)
+                    
+                    # Check auto-recording timeout
+                    if self.auto_recording:
+                        self.check_auto_recording_timeout()
+                    
                     # Draw all validated objects
                     for obj in validated_objects:
                         try:
@@ -433,8 +597,9 @@ class AerialDetectionSystem:
                                     except:
                                         pass
                     
-                    # Draw UI
+                    # Draw military-style UI elements
                     self.draw_stats_panel(frame)
+                    self.draw_military_hud_elements(frame)
                     
                     # Draw optical flow visualization if enabled
                     if self.show_optical_flow and hasattr(self.flow_detector, 'motion_accumulator'):
@@ -447,14 +612,14 @@ class AerialDetectionSystem:
                             # Blend with original frame
                             cv2.addWeighted(frame, 0.8, motion_colored, 0.2, 0, frame)
                     
-                    # Draw crosshair
-                    height, width = frame.shape[:2]
-                    center_x, center_y = width // 2, height // 2
-                    cv2.line(frame, (center_x - 20, center_y), (center_x + 20, center_y), (0, 255, 0), 1)
-                    cv2.line(frame, (center_x, center_y - 20), (center_x, center_y + 20), (0, 255, 0), 1)
+                    # # Draw crosshair
+                    # height, width = frame.shape[:2]
+                    # center_x, center_y = width // 2, height // 2
+                    # cv2.line(frame, (center_x - 20, center_y), (center_x + 20, center_y), (0, 255, 0), 1)
+                    # cv2.line(frame, (center_x, center_y - 20), (center_x, center_y + 20), (0, 255, 0), 1)
                     
-                    # Record if enabled
-                    if self.recording and self.video_writer is not None:
+                    # Record if enabled (manual recording or auto-recording)
+                    if (self.recording or self.auto_recording) and self.video_writer is not None:
                         self.video_writer.write(frame)
                     
                     # Display
@@ -491,27 +656,37 @@ class AerialDetectionSystem:
                     print(f"Debug mode: {'ON' if self.show_debug else 'OFF'}")
                     
                 elif key == ord('r'):
-                    if not self.recording:
-                        # Start recording
+                    if not self.recording and not self.auto_recording:
+                        # Start manual recording
                         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-                        filename = f"aerial_recording_{timestamp}.mp4"
+                        filename = f"{self.videos_dir}/manual_recording_{timestamp}.mp4"
                         fourcc = cv2.VideoWriter_fourcc(*'mp4v')
                         fps = 30
                         frame_size = (frame.shape[1], frame.shape[0])
                         self.video_writer = cv2.VideoWriter(filename, fourcc, fps, frame_size)
                         self.recording = True
-                        print(f"Recording started: {filename}")
-                    else:
-                        # Stop recording
+                        print(f"Manual recording started: {filename}")
+                    elif self.recording:
+                        # Stop manual recording
                         if self.video_writer:
                             self.video_writer.release()
                             self.video_writer = None
                         self.recording = False
-                        print("Recording stopped")
+                        print("Manual recording stopped")
+                    else:
+                        print("Cannot start manual recording - auto-recording is active")
+                
+                elif key == ord('a'):
+                    # Toggle auto-recording feature
+                    self.auto_record = not self.auto_record
+                    if not self.auto_record and self.auto_recording:
+                        # Stop current auto-recording if disabling feature
+                        self.stop_auto_recording()
+                    print(f"Auto-recording: {'ON' if self.auto_record else 'OFF'}")
                         
                 elif key == ord('l'):
                     # Save detection log
-                    log_save_file = f"detection_summary_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+                    log_save_file = f"{self.logs_dir}/detection_summary_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
                     with open(log_save_file, 'w') as f:
                         json.dump(self.detection_log, f, indent=2)
                     print(f"Detection log saved to: {log_save_file}")
@@ -541,7 +716,7 @@ class AerialDetectionSystem:
                     
                 elif key == ord('p'):
                     # Take screenshot
-                    screenshot_file = f"screenshot_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+                    screenshot_file = f"{self.screenshots_dir}/screenshot_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
                     cv2.imwrite(screenshot_file, frame)
                     print(f"Screenshot saved: {screenshot_file}")
                     
@@ -577,9 +752,13 @@ class AerialDetectionSystem:
             # Stop camera
             self.camera.stop()
             
-            # Close video writer
+            # Close video writer and stop any active recordings
             if self.video_writer:
                 self.video_writer.release()
+            
+            # Stop auto-recording if active
+            if self.auto_recording:
+                self.stop_auto_recording()
             
             # Close log file
             if self.log_file:
@@ -589,32 +768,33 @@ class AerialDetectionSystem:
             cv2.destroyAllWindows()
             
             # Print final statistics
-            print("\n" + "=" * 50)
-            print("FINAL STATISTICS")
-            print("=" * 50)
-            print(f"Total validated objects: {self.detector.validated_objects}")
-            print(f"False positives filtered: {self.detector.false_positives_filtered}")
+            print("\n" + "=" * 60)
+            print("    MISSION DEBRIEF - SURVEILLANCE COMPLETE")
+            print("=" * 60)
+            print(f"CONFIRMED TARGETS: {self.detector.validated_objects}")
+            print(f"FALSE CONTACTS FILTERED: {self.detector.false_positives_filtered}")
             
             if self.detector.validated_objects + self.detector.false_positives_filtered > 0:
                 filter_rate = self.detector.false_positives_filtered / (self.detector.validated_objects + self.detector.false_positives_filtered) * 100
-                print(f"Noise filter effectiveness: {filter_rate:.1f}%")
+                print(f"FILTER EFFICIENCY: {filter_rate:.1f}%")
             
-            print(f"Average processing time: {self.avg_process_time:.2f}ms")
-            print(f"Max processing time: {self.max_process_time:.2f}ms")
-            print(f"Total detections logged: {len(self.detection_log)}")
+            print(f"AVG PROCESSING TIME: {self.avg_process_time:.2f}ms")
+            print(f"MAX PROCESSING TIME: {self.max_process_time:.2f}ms")
+            print(f"INTELLIGENCE RECORDS: {len(self.detection_log)}")
             
-            # Summary by type
+            # Threat assessment summary
             if self.detection_log:
                 type_counts = {}
                 for detection in self.detection_log:
                     obj_type = detection['classification']
                     type_counts[obj_type] = type_counts.get(obj_type, 0) + 1
                 
-                print("\nDetections by type:")
+                print("\nTHREAT BREAKDOWN:")
                 for obj_type, count in sorted(type_counts.items()):
-                    print(f"  {obj_type.replace('_', ' ').title()}: {count}")
+                    threat_type = obj_type.replace('_', ' ').upper()
+                    print(f"  {threat_type}: {count} CONTACTS")
             
-            print("\nShutdown complete.")
+            print("\nSURVEILLANCE SYSTEM: OFFLINE")
 
 
 def main():
