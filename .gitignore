@@ -44,4 +44,8 @@ __pycache__
 *.zip
 *.gz
 
+/aodetect/detections_output/videos/
+/aodetect/detections_output/logs/
+/aodetect/detections_output/screenshots/
 /aodetect/detections_output/.DS_Store
+/aodetect/.DS_Store

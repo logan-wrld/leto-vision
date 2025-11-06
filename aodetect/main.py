@@ -509,7 +509,7 @@ class AerialDetectionSystem:
         print("=" * 60)
         
         # Create window - larger default size with military title
-        window_name = 'TACTICAL AERIAL SURVEILLANCE SYSTEM'
+        window_name = 'AERIAL OBJECT DETECTION'
         cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
         cv2.resizeWindow(window_name, 1600, 900)
         
