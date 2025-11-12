@@ -7,7 +7,7 @@ coco.names
 .DS_Store
 aodetect/detections_output/.DS_Store
 
-
+/record/data/
 # Python cache files
 __pycache__/
 *.pyc
@@ -50,3 +50,4 @@ __pycache__
 /aodetect/detections_output/screenshots/
 /aodetect/detections_output/.DS_Store
 /aodetect/.DS_Store
+.DS_Store
