@@ -247,15 +247,12 @@ class AerialDetectionSystem:
         cv2.line(frame, (panel_x + panel_width, panel_y + panel_height), (panel_x + panel_width - bracket_size, panel_y + panel_height), military_green, 3)
         cv2.line(frame, (panel_x + panel_width, panel_y + panel_height), (panel_x + panel_width, panel_y + panel_height - bracket_size), military_green, 3)
         
-        # Military HUD header
-        cv2.putText(frame, "AERIAL SURVEILLANCE", (panel_x + 20, panel_y + 25),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, military_green, 2)
-        cv2.putText(frame, "SYSTEM ACTIVE", (panel_x + 20, panel_y + 45),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 200, 0), 1)
+        cv2.putText(frame, "SYSTEM ACTIVE", (panel_x + 20, panel_y + 25),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 200, 0), 1)
         
         # Divider line
-        cv2.line(frame, (panel_x + 20, panel_y + 55), 
-                (panel_x + panel_width - 20, panel_y + 55), military_green, 1)
+        cv2.line(frame, (panel_x + 20, panel_y + 35), 
+                (panel_x + panel_width - 20, panel_y + 35), military_green, 1)
         
         # Count active objects by type
         object_counts = {}
@@ -265,7 +262,7 @@ class AerialDetectionSystem:
                 object_counts[obj_type] = object_counts.get(obj_type, 0) + 1
         
         # Start data display
-        y_offset = panel_y + 75
+        y_offset = panel_y + 55
         
         # System stats - military style
         flow_tracks = len(self.flow_tracker.tracked_objects) if hasattr(self, 'flow_tracker') else 0
@@ -308,26 +305,30 @@ class AerialDetectionSystem:
                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
             else:
                 # Add small spacing for separator
-                y_offset += 8
-            y_offset += 24
+                y_offset += 6
+            y_offset += 20
         
-        # Military-style threat assessment
-        if object_counts:
+        # Military-style threat assessment - ensure it stays within panel bounds
+        if object_counts and y_offset < (panel_y + panel_height - 60):  # Leave 60px buffer
             # Threat level header
-            cv2.line(frame, (panel_x + 20, y_offset), 
-                    (panel_x + panel_width - 20, y_offset), military_green, 1)
-            y_offset += 10
-            cv2.putText(frame, "THREAT ASSESSMENT:", (panel_x + 25, y_offset),
+            cv2.line(frame, (panel_x + 20, y_offset + 5), 
+                    (panel_x + panel_width - 20, y_offset + 5), military_green, 1)
+            y_offset += 15
+            cv2.putText(frame, "CONTACTS:", (panel_x + 25, y_offset),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, military_green, 1)
             y_offset += 20
             
             for obj_type, count in sorted(object_counts.items()):
+                # Check if we have space for this line
+                if y_offset > (panel_y + panel_height - 25):
+                    break
+                    
                 # Military classifications
                 if 'aircraft' in obj_type:
                     threat_name = "AIRCRAFT"
                     threat_color = (0, 255, 255)  # Cyan for aircraft
                 elif 'light' in obj_type:
-                    threat_name = "NAV-LIGHT"
+                    threat_name = "NAV-LIGHT" 
                     threat_color = (255, 255, 0)  # Yellow for lights
                 elif 'flow' in obj_type:
                     threat_name = "MOTION-TGT"
@@ -337,10 +338,10 @@ class AerialDetectionSystem:
                     threat_color = (255, 255, 255)  # White for unknown
                 
                 cv2.putText(frame, f"{threat_name}", (panel_x + 30, y_offset),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.45, threat_color, 1)
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.4, threat_color, 1)
                 cv2.putText(frame, f"x{count}", (panel_x + 280, y_offset),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, threat_color, 2)
-                y_offset += 20
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.45, threat_color, 2)
+                y_offset += 18
         
         # Military-style status indicators in top-right
         if self.recording:

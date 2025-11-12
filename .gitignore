@@ -4,7 +4,8 @@
 yolov4.weights
 yolov4.cfg
 coco.names
-
+.DS_Store
+aodetect/detections_output/.DS_Store
 
 
 # Python cache files
