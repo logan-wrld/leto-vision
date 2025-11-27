@@ -12,7 +12,7 @@ import time
 
 class OpenCVFlowDetector:
     """Pure OpenCV dense optical flow detector optimized for aerial object detection"""
-    
+    # Do better nightime training for better detection in low light 
     def __init__(self, flow_threshold=1.0):
         """
         Initialize flow detector
