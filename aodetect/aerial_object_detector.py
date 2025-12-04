@@ -868,6 +868,8 @@ def main():
     
     # For your RTSP camera, use:
     # source = "rtsps://192.168.0.199:7441/Ep4rnzfdW2oGzpNp?enableSrtp"
+
+    # move flow to VideoProcessor
     
     processor = VideoProcessor(args.source)
     processor.detector.min_confidence = args.confidence
