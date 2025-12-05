@@ -15,6 +15,7 @@ from opencv_flow import OpenCVFlowDetector, OpticalFlowTracker
 import argparse
 import json
 from datetime import datetime
+import subprocess
 
 
 class AerialDetectionSystem:
@@ -770,19 +771,13 @@ class AerialDetectionSystem:
             
             # Print final statistics
             print("\n" + "=" * 60)
-            print("    MISSION DEBRIEF - SURVEILLANCE COMPLETE")
-            print("=" * 60)
-            print(f"CONFIRMED TARGETS: {self.detector.validated_objects}")
-            print(f"FALSE CONTACTS FILTERED: {self.detector.false_positives_filtered}")
+
             
             if self.detector.validated_objects + self.detector.false_positives_filtered > 0:
                 filter_rate = self.detector.false_positives_filtered / (self.detector.validated_objects + self.detector.false_positives_filtered) * 100
                 print(f"FILTER EFFICIENCY: {filter_rate:.1f}%")
             
-            print(f"AVG PROCESSING TIME: {self.avg_process_time:.2f}ms")
-            print(f"MAX PROCESSING TIME: {self.max_process_time:.2f}ms")
-            print(f"INTELLIGENCE RECORDS: {len(self.detection_log)}")
-            
+
             # Threat assessment summary
             if self.detection_log:
                 type_counts = {}
@@ -796,7 +791,18 @@ class AerialDetectionSystem:
                     print(f"  {threat_type}: {count} CONTACTS")
             
             print("\nSURVEILLANCE SYSTEM: OFFLINE")
-
+    
+    
+def get_youtube_stream_url(youtube_url):
+    """Use yt-dlp to get the direct stream URL"""
+    cmd = ['yt-dlp', '-f', 'best[ext=mp4]/best', '-g', youtube_url]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        return result.stdout.strip()
+    except (subprocess.CalledProcessError, FileNotFoundError) as e:
+        print(f"Error getting stream URL with yt-dlp: {e}")
+        print("Please ensure 'yt-dlp' is installed and in your PATH.")
+        return None
 
 def main():
     """Main entry point"""
@@ -814,8 +820,16 @@ def main():
     
     args = parser.parse_args()
     
+    source = args.source
+    if "youtube.com" in source or "youtu.be" in source:
+        print(f"YouTube link detected. Getting stream URL for: {source}")
+        source = get_youtube_stream_url(source)
+        if not source:
+            print("Could not get YouTube stream URL. Exiting.")
+            return
+    
     # Create detection system
-    system = AerialDetectionSystem(args.source, args.resolution)
+    system = AerialDetectionSystem(source, args.resolution)
     
     # Apply settings
     system.detector.min_confidence = args.confidence

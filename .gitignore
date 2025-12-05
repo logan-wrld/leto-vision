@@ -51,3 +51,7 @@ __pycache__
 /aodetect/detections_output/.DS_Store
 /aodetect/.DS_Store
 .DS_Store
+
+
+# new web-stream based training pipeline
+
