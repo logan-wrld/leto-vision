@@ -60,10 +60,20 @@ class SimpleCamera:
                 print(f"Failed to open camera source: {self.source}")
                 return False
             
-            # Set properties
+            # Optimized properties for stream stability
             self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.target_width)
             self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.target_height)
-            self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+            self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # Minimal buffering
+            
+            # Stream stability optimizations
+            if self.source.startswith('http'):
+                # YouTube/web stream optimizations
+                self.cap.set(cv2.CAP_PROP_FPS, 20)  # Limit FPS for stability
+                self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'H264'))
+            elif self.source.startswith('rtsp'):
+                # RTSP stream optimizations
+                self.cap.set(cv2.CAP_PROP_FPS, 15)
+                self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 0)  # No buffering for RTSP
             
             self.running = True
             self.capture_thread = threading.Thread(target=self._capture_loop)
@@ -96,14 +106,17 @@ class SimpleCamera:
                         # if frame.shape[1] != self.target_width or frame.shape[0] != self.target_height:
                         #     frame = cv2.resize(frame, (self.target_width, self.target_height))
                         
-                        # Update queue (drop old frames if full)
-                        if self.frame_queue.full():
+                        # Aggressive frame dropping for stability
+                        # Clear queue if it has more than 1 frame to prevent lag
+                        while self.frame_queue.qsize() > 1:
                             try:
                                 self.frame_queue.get_nowait()
                             except:
-                                pass
+                                break
                         
-                        self.frame_queue.put(frame)
+                        # Only add frame if queue isn't full
+                        if not self.frame_queue.full():
+                            self.frame_queue.put(frame)
                         
                         # Update FPS
                         current_time = time.time()

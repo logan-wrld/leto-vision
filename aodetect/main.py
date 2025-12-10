@@ -11,6 +11,7 @@ import time
 from collections import deque
 from aerial_object_detector import AerialObjectDetector, TrackedObject
 from simple_camera import SimpleCamera
+from stream_player import HardwareStreamPlayer
 from opencv_flow import OpenCVFlowDetector, OpticalFlowTracker
 import argparse
 import json
@@ -21,47 +22,40 @@ import subprocess
 class AerialDetectionSystem:
     """Complete aerial detection system with camera integration"""
     
-    def __init__(self, camera_source, resolution="1280x720", performance_mode="auto"):
+    def __init__(self, camera_source, resolution="1280x720"):
         """
         Initialize the detection system
         Args:
             camera_source: RTSP URL, file path, or camera index
             resolution: Camera resolution
-            performance_mode: 'auto', 'high_performance', 'm1_optimized', 'gpu_optimized'
         """
-        # M1 Pro Performance Detection and Optimization
-        import platform
-        self.is_m1_mac = platform.processor() == 'arm' or 'arm64' in platform.platform().lower()
+        # Use hardware-accelerated player for YouTube/HTTP streams
+        self.is_youtube_stream = 'youtube.com' in camera_source or 'youtu.be' in camera_source or camera_source.startswith('http')
         
-        # Auto-detect performance mode
-        if performance_mode == "auto":
-            performance_mode = "m1_optimized" if self.is_m1_mac else "gpu_optimized"
-        
-        self.performance_mode = performance_mode
-        print(f"Performance mode: {performance_mode} (M1 detected: {self.is_m1_mac})")
-        
-        # Adaptive resolution for M1 Pro
-        if performance_mode == "m1_optimized" and resolution == "1280x720":
-            resolution = "960x540"  # Reduced resolution for better performance
-            print(f"M1 Pro optimization: Using {resolution} for better performance")
-        
-        self.camera = SimpleCamera(camera_source, resolution, buffer_size=2 if self.is_m1_mac else 5)
+        if self.is_youtube_stream:
+            # Parse resolution
+            if 'x' in resolution:
+                w, h = resolution.split('x')
+                width, height = int(w), int(h)
+            else:
+                width, height = 960, 540  # Default lower res for streams
+            
+            # Use reduced resolution for smooth playback
+            width = min(width, 960)
+            height = min(height, 540)
+            
+            self.camera = HardwareStreamPlayer(camera_source, width, height, fps=24)
+            print(f"🎬 Using hardware-accelerated stream player")
+        else:
+            # Ultra-minimal buffer for smoothest playback
+            self.camera = SimpleCamera(camera_source, resolution, buffer_size=1)
         self.detector = AerialObjectDetector(min_confidence=0.6)
         
-        # M1-Optimized Optical Flow Settings
-        if performance_mode == "m1_optimized":
-            self.flow_detector = OpenCVFlowDetector(flow_threshold=2.0)  # Less sensitive for performance
-            self.flow_tracker = OpticalFlowTracker(max_distance=40)      # Smaller tracking distance
-            self.enable_optical_flow = False  # Disabled by default on M1
-            self.frame_skip_interval = 2      # Process every 2nd frame
-        else:
-            self.flow_detector = OpenCVFlowDetector(flow_threshold=1.5)
-            self.flow_tracker = OpticalFlowTracker(max_distance=60)
-            self.enable_optical_flow = True
-            self.frame_skip_interval = 1      # Process every frame
-        
+        # OpenCV Dense Optical Flow Integration
+        self.flow_detector = OpenCVFlowDetector(flow_threshold=1.5)
+        self.flow_tracker = OpticalFlowTracker(max_distance=60)
+        self.enable_optical_flow = True
         self.show_optical_flow = False
-        self.frame_skip_counter = 0
         
         # AERIAL-ONLY MODE: High-altitude camera detecting airborne objects only
         self.detector.min_consecutive_detections = 15   # Reduced with optical flow assistance
@@ -99,6 +93,33 @@ class AerialDetectionSystem:
         self.process_times = []
         self.max_process_time = 0
         self.avg_process_time = 0
+        
+        # UI Performance settings
+        self.max_objects_to_draw = 50  # Limit objects drawn to prevent UI lag
+        self.ui_performance_threshold = 100  # ms - switch to minimal UI if exceeded
+        self.frame_skip_counter = 0
+        self.adaptive_ui_mode = False
+        
+        # Playback optimization settings
+        self.frame_skip_interval = 1  # Process every nth frame (1 = every frame)
+        self.target_fps = 20  # Reduced target FPS for stability
+        self.last_display_time = 0
+        self.frame_display_interval = 1.0 / self.target_fps
+        self.processing_budget = 40  # Increased budget for stability
+        self.adaptive_processing = True
+        
+        # Ultra-aggressive stream settings for smooth playback
+        self.max_frame_queue = 1  # Single frame buffer only
+        self.frame_timeout = 0.05  # 50ms timeout
+        self.stable_mode = True  
+        self.last_successful_frame = None  
+        self.consecutive_failures = 0
+        self.max_consecutive_failures = 3  # Fail faster
+        
+        # Emergency playback mode
+        self.playback_only_mode = False  # Skip all detection when True
+        self.force_minimal_processing = True
+        self.skip_detection_frames = 5  # Only detect every 5th frame
         
         # Create output directories for recordings and logs
         self.output_dir = "detections_output"
@@ -148,14 +169,38 @@ class AerialDetectionSystem:
                     merged_objects.append(pseudo_obj)
         
         return merged_objects
+    
+    def process_frame_full(self, frame):
+        """Full frame processing with both detection methods"""
+        # Traditional brightness-based detection
+        validated_objects = self.detector.process_frame(frame)
+        
+        # Optical Flow detection (adaptive based on performance)
+        flow_objects = []
+        if self.enable_optical_flow and self.avg_process_time < self.processing_budget:
+            motion_objects = self.flow_detector.process_frame_pair(frame, min_area=5, max_area=200)
+            flow_objects = self.flow_tracker.update_tracks(motion_objects)
+            
+            # Merge optical flow detections with brightness detections
+            validated_objects = self.merge_detections(validated_objects, flow_objects)
+        elif self.enable_optical_flow:
+            # Temporarily disable optical flow if we're over budget
+            if self.frame_skip_counter % 100 == 0:  # Periodically log this
+                print(f"⚠️ Optical flow temporarily disabled - processing time: {self.avg_process_time:.1f}ms")
+        
+        return validated_objects
         
     def draw_object(self, frame: np.ndarray, obj: TrackedObject):
-        """Enhanced object drawing with better visualization"""
+        """Enhanced object drawing with performance optimizations"""
         
         if len(obj.positions) == 0:
             return
         
         current_pos = obj.positions[-1]
+        
+        # Skip drawing if position is invalid
+        if current_pos[0] < 0 or current_pos[1] < 0 or current_pos[0] >= frame.shape[1] or current_pos[1] >= frame.shape[0]:
+            return
         
         # Enhanced color scheme for dual detection mode + optical flow
         color_map = {
@@ -186,20 +231,30 @@ class AerialDetectionSystem:
         if not self.show_debug and obj.classification and 'stationary' in obj.classification:
             return
         
-        # Draw trail with gradient
+        # Draw trail with gradient - simplified in performance mode
         if self.show_trails and len(obj.positions) > 1:
             positions = list(obj.positions)
-            trail_start = max(0, len(positions) - self.trail_length)
             
-            for i in range(trail_start + 1, len(positions)):
-                # Gradient fade
-                alpha = (i - trail_start) / (len(positions) - trail_start)
-                trail_color = tuple(int(c * alpha) for c in color)
-                
-                pt1 = positions[i-1]
-                pt2 = positions[i]
-                thickness = int(1 + alpha * 2)  # Thicker line for recent positions
-                cv2.line(frame, pt1, pt2, trail_color, thickness)
+            # Adaptive trail rendering based on performance
+            if self.adaptive_ui_mode:
+                # Simple trail - just last 5 positions
+                trail_start = max(0, len(positions) - 5)
+                for i in range(trail_start + 1, len(positions)):
+                    pt1 = positions[i-1]
+                    pt2 = positions[i]
+                    cv2.line(frame, pt1, pt2, color, 1)
+            else:
+                # Full gradient trail
+                trail_start = max(0, len(positions) - self.trail_length)
+                for i in range(trail_start + 1, len(positions)):
+                    # Gradient fade
+                    alpha = (i - trail_start) / (len(positions) - trail_start)
+                    trail_color = tuple(int(c * alpha) for c in color)
+                    
+                    pt1 = positions[i-1]
+                    pt2 = positions[i]
+                    thickness = int(1 + alpha * 2)  # Thicker line for recent positions
+                    cv2.line(frame, pt1, pt2, trail_color, thickness)
         
         # Different highlighting for large vs small objects
         avg_area = np.mean(list(obj.area_history)) if len(obj.area_history) > 0 else 5
@@ -382,19 +437,42 @@ class AerialDetectionSystem:
             cv2.putText(frame, "AUTO-REC", (panel_x + panel_width - 88, panel_y + 28),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.35, (255, 165, 0), 2)
 
-    def draw_minimal_stats(self, frame: np.ndarray):
-        """Draw minimal stats for performance-constrained rendering"""
+    def draw_performance_indicator(self, frame: np.ndarray):
+        """Minimal performance indicator"""
+        color = (0, 255, 0) if self.avg_process_time < 20 else (0, 255, 255) if self.avg_process_time < 40 else (0, 0, 255)
+        cv2.circle(frame, (30, 30), 10, color, -1)
+        
+    def draw_lightweight_stats(self, frame: np.ndarray):
+        """Draw ultra-lightweight stats for maximum stability"""
+        validated_count = len([o for o in self.detector.tracked_objects.values() if o.is_validated])
+        cv2.putText(frame, f"T:{validated_count} P:{self.avg_process_time:.0f}ms", (10, 25),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+    
+    def draw_minimal_ui(self, frame: np.ndarray, total_objects: int):
+        """Draw minimal UI for high-performance situations"""
         height, width = frame.shape[:2]
         
-        # Simple performance indicator
+        # Essential info only - top-left corner
         validated_count = len([o for o in self.detector.tracked_objects.values() if o.is_validated])
+        
+        # Performance indicator color
         perf_color = (0, 255, 0) if self.avg_process_time < 30 else (0, 255, 255) if self.avg_process_time < 50 else (0, 0, 255)
         
-        # Top-left corner minimal info
+        # Minimal stats
         cv2.putText(frame, f"TARGETS: {validated_count}", (10, 25),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
-        cv2.putText(frame, f"PERF: {self.avg_process_time:.0f}ms", (10, 45),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+        cv2.putText(frame, f"TOTAL: {total_objects}", (10, 50),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
+        cv2.putText(frame, f"PERF: {self.avg_process_time:.0f}ms", (10, 75),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, perf_color, 1)
+        
+        # Recording status
+        if self.recording:
+            cv2.putText(frame, "MANUAL REC", (10, 100),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 255), 2)
+        elif self.auto_recording:
+            cv2.putText(frame, "AUTO REC", (10, 100),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 165, 0), 2)
     
     def draw_military_hud_elements(self, frame: np.ndarray):
         """Draw military-style HUD elements"""
@@ -548,6 +626,14 @@ class AerialDetectionSystem:
         print("  [F] Optical Flow")
         print("  [O] Flow Overlay")
         print("  [M/N] Flow Tuning")
+        print("  [U] Toggle UI Mode")
+        print("  [1/2] Object Limit")
+        print("  [3/4] Target FPS")
+        print("  [5] Adaptive Processing")
+        print("  [6] Stable Mode")
+        print("  [7] Emergency Stability")
+        print("  [8] Playback-Only Mode")
+        print("  [9/0] Detection Interval")
         print("=" * 60)
         
         # Create window - larger default size with military title
@@ -571,37 +657,38 @@ class AerialDetectionSystem:
                     time.sleep(0.1)
                     continue
                 
+                # ULTRA-simple frame validation
+                if frame is None or frame.size == 0:
+                    continue  # Just skip bad frames
+                
                 frame_count += 1
+                self.frame_skip_counter += 1
                 
                 # Periodic cleanup of old auto-recordings (every 1000 frames)
                 if frame_count % 1000 == 0:
                     self.cleanup_old_auto_recordings()
                 
-                try:
-                    # M1 Pro Frame Skipping Optimization
-                    self.frame_skip_counter += 1
-                    should_process_frame = (self.frame_skip_counter % self.frame_skip_interval == 0)
+                # PLAYBACK-FIRST processing - minimal detection
+                start_time = time.time()
+                
+                if self.playback_only_mode:
+                    # Pure playback mode - no detection at all
+                    validated_objects = []
+                else:
+                    # Minimal detection - only every Nth frame
+                    should_detect = (self.frame_skip_counter % self.skip_detection_frames == 0)
                     
-                    if should_process_frame:
-                        # Process frame with adaptive detection based on performance mode
-                        start_time = time.time()
-                        
-                        # Traditional brightness-based detection
-                        validated_objects = self.detector.process_frame(frame)
-                        
-                        # Adaptive Optical Flow - only if enabled and not overloaded
-                        flow_objects = []
-                        if self.enable_optical_flow and self.avg_process_time < 50:  # Skip flow if too slow
-                            motion_objects = self.flow_detector.process_frame_pair(frame, min_area=5, max_area=200)
-                            flow_objects = self.flow_tracker.update_tracks(motion_objects)
-                            
-                            # Merge optical flow detections with brightness detections
-                            validated_objects = self.merge_detections(validated_objects, flow_objects)
-                        elif self.enable_optical_flow and self.avg_process_time >= 50:
-                            print("Optical flow temporarily disabled - performance too slow")
+                    if should_detect and self.avg_process_time < 15:  # Only if very fast
+                        # Absolute minimum detection
+                        try:
+                            validated_objects = self.detector.process_frame(frame)
+                            # Limit to prevent lag
+                            validated_objects = validated_objects[:5]  
+                        except:
+                            validated_objects = []
                     else:
-                        # Use cached detections from previous frame for smooth display
-                        validated_objects = list(self.detector.tracked_objects.values())
+                        # Skip detection entirely, use cached
+                        validated_objects = [obj for obj in getattr(self.detector, 'tracked_objects', {}).values() if getattr(obj, 'is_validated', False)][:3]
                     
                     process_time = (time.time() - start_time) * 1000  # Convert to ms
                     
@@ -612,9 +699,21 @@ class AerialDetectionSystem:
                     self.avg_process_time = np.mean(self.process_times)
                     self.max_process_time = max(self.max_process_time, process_time)
                     
+                    # Adaptive processing adjustment
+                    if self.adaptive_processing:
+                        if self.avg_process_time > self.processing_budget * 1.5:
+                            # Increase frame skipping if we're consistently over budget
+                            if self.frame_skip_interval < 4:
+                                self.frame_skip_interval += 1
+                                print(f"📉 Increasing frame skip to every {self.frame_skip_interval} frames (avg: {self.avg_process_time:.1f}ms)")
+                        elif self.avg_process_time < self.processing_budget * 0.7:
+                            # Decrease frame skipping if we have performance headroom
+                            if self.frame_skip_interval > 1:
+                                self.frame_skip_interval -= 1
+                                print(f"📈 Decreasing frame skip to every {self.frame_skip_interval} frames (avg: {self.avg_process_time:.1f}ms)")
+                    
                     # Check for motion to trigger auto-recording
-                    has_current_motion = (len(validated_objects) > 0 or 
-                                        (self.enable_optical_flow and len(flow_objects) > 0))
+                    has_current_motion = len(validated_objects) > 0
                     
                     # Auto-recording logic
                     if self.auto_record and not self.auto_recording and has_current_motion:
@@ -624,19 +723,18 @@ class AerialDetectionSystem:
                     if self.auto_recording:
                         self.check_auto_recording_timeout()
                     
-                    # Draw all validated objects
-                    for obj in validated_objects:
-                        try:
-                            self.draw_object(frame, obj)
-                            
-                            # Log new validated objects
-                            if obj.consecutive_detections == self.detector.min_consecutive_detections:
-                                self.log_detection(obj)
-                                classification_name = obj.classification if obj.classification else "unknown"
-                                print(f"NEW DETECTION: {classification_name} (Confidence: {obj.confidence:.2f})")
-                        except Exception as e:
-                            print(f"Warning: Error drawing object: {e}")
-                            continue
+                    # MINIMAL object drawing for smooth playback
+                    if not self.playback_only_mode and len(validated_objects) > 0:
+                        # Draw maximum 3 objects with simple markers
+                        for i, obj in enumerate(validated_objects[:3]):
+                            if hasattr(obj, 'positions') and len(obj.positions) > 0:
+                                try:
+                                    pos = obj.positions[-1]
+                                    cv2.circle(frame, pos, 8, (0, 255, 0), 2)
+                                except:
+                                    pass
+                            if i >= 2:  # Hard limit
+                                break
                     
                     # Draw debug objects if enabled
                     if self.show_debug:
@@ -649,14 +747,9 @@ class AerialDetectionSystem:
                                     except:
                                         pass
                     
-                    # Adaptive UI rendering based on performance
-                    if should_process_frame or self.avg_process_time < 30:
-                        # Full UI rendering when performance is good
-                        self.draw_stats_panel(frame)
-                        self.draw_military_hud_elements(frame)
-                    else:
-                        # Simplified UI when performance is struggling
-                        self.draw_minimal_stats(frame)
+                    # ULTRA-minimal UI for maximum performance
+                    if not self.playback_only_mode and self.frame_skip_counter % 10 == 0:  # Update UI every 10th frame only
+                        self.draw_performance_indicator(frame)
                     
                     # Draw optical flow visualization if enabled
                     if self.show_optical_flow and hasattr(self.flow_detector, 'motion_accumulator'):
@@ -679,16 +772,12 @@ class AerialDetectionSystem:
                     if (self.recording or self.auto_recording) and self.video_writer is not None:
                         self.video_writer.write(frame)
                     
-                    # Display
-                    cv2.imshow(window_name, frame)
-                    
-                except Exception as e:
-                    print(f"Warning: Error processing frame: {e}")
-                    # Still try to display the frame even if processing failed
+                    # Simplified display for stream stability
                     try:
                         cv2.imshow(window_name, frame)
-                    except:
-                        pass
+                    except Exception as e:
+                        print(f"Display error: {e}")
+                        continue
                 
                 # Handle keyboard input
                 key = cv2.waitKey(1) & 0xFF
@@ -799,6 +888,66 @@ class AerialDetectionSystem:
                         self.flow_detector.flow_threshold = min(5.0, self.flow_detector.flow_threshold + 0.5)
                         print(f"Flow sensitivity decreased (threshold: {self.flow_detector.flow_threshold:.1f})")
                 
+                elif key == ord('u'):
+                    # Toggle UI mode manually
+                    self.adaptive_ui_mode = not self.adaptive_ui_mode
+                    print(f"UI Mode: {'MINIMAL' if self.adaptive_ui_mode else 'FULL'}")
+                
+                elif key == ord('1'):
+                    # Reduce object limit
+                    self.max_objects_to_draw = max(5, self.max_objects_to_draw - 10)
+                    print(f"Max objects to draw: {self.max_objects_to_draw}")
+                
+                elif key == ord('2'):
+                    # Increase object limit
+                    self.max_objects_to_draw = min(200, self.max_objects_to_draw + 10)
+                    print(f"Max objects to draw: {self.max_objects_to_draw}")
+                
+                elif key == ord('3'):
+                    # Decrease target FPS
+                    self.target_fps = max(10, self.target_fps - 5)
+                    self.frame_display_interval = 1.0 / self.target_fps
+                    print(f"Target FPS: {self.target_fps}")
+                
+                elif key == ord('4'):
+                    # Increase target FPS
+                    self.target_fps = min(60, self.target_fps + 5)
+                    self.frame_display_interval = 1.0 / self.target_fps
+                    print(f"Target FPS: {self.target_fps}")
+                
+                elif key == ord('5'):
+                    # Toggle adaptive processing
+                    self.adaptive_processing = not self.adaptive_processing
+                    print(f"Adaptive processing: {'ON' if self.adaptive_processing else 'OFF'}")
+                
+                elif key == ord('6'):
+                    # Toggle stable mode
+                    self.stable_mode = not self.stable_mode
+                    print(f"Stable mode: {'ON' if self.stable_mode else 'OFF'}")
+                
+                elif key == ord('7'):
+                    # Emergency stability mode
+                    self.frame_skip_interval = 3
+                    self.stable_mode = True
+                    self.target_fps = 15
+                    self.frame_display_interval = 1.0 / self.target_fps
+                    print("🚨 Emergency stability mode activated")
+                
+                elif key == ord('8'):
+                    # Pure playback mode - no detection
+                    self.playback_only_mode = not self.playback_only_mode
+                    print(f"🎥 Playback-only mode: {'ON' if self.playback_only_mode else 'OFF'}")
+                
+                elif key == ord('9'):
+                    # Increase detection skip interval
+                    self.skip_detection_frames = min(20, self.skip_detection_frames + 1)
+                    print(f"Detection every {self.skip_detection_frames} frames")
+                
+                elif key == ord('0'):
+                    # Decrease detection skip interval  
+                    self.skip_detection_frames = max(1, self.skip_detection_frames - 1)
+                    print(f"Detection every {self.skip_detection_frames} frames")
+                
         except KeyboardInterrupt:
             print("\nShutdown requested...")
             
@@ -872,22 +1021,13 @@ def main():
                       help='Minimum confidence threshold (0.0-1.0)')
     parser.add_argument('--brightness', type=int, default=190,
                       help='Brightness threshold (100-250, lower = more sensitive)')
-    parser.add_argument('--performance', default='auto', 
-                      choices=['auto', 'high_performance', 'm1_optimized', 'gpu_optimized'],
-                      help='Performance optimization mode (auto detects M1)')
     
     args = parser.parse_args()
     
     source = args.source
-    if "youtube.com" in source or "youtu.be" in source:
-        print(f"YouTube link detected. Getting stream URL for: {source}")
-        source = get_youtube_stream_url(source)
-        if not source:
-            print("Could not get YouTube stream URL. Exiting.")
-            return
     
-    # Create detection system with performance optimization
-    system = AerialDetectionSystem(source, args.resolution, args.performance)
+    # Create detection system - HardwareStreamPlayer handles YouTube URLs internally
+    system = AerialDetectionSystem(source, args.resolution)
     
     # Apply settings
     system.detector.min_confidence = args.confidence
