@@ -21,21 +21,47 @@ import subprocess
 class AerialDetectionSystem:
     """Complete aerial detection system with camera integration"""
     
-    def __init__(self, camera_source, resolution="1280x720"):
+    def __init__(self, camera_source, resolution="1280x720", performance_mode="auto"):
         """
         Initialize the detection system
         Args:
             camera_source: RTSP URL, file path, or camera index
             resolution: Camera resolution
+            performance_mode: 'auto', 'high_performance', 'm1_optimized', 'gpu_optimized'
         """
-        self.camera = SimpleCamera(camera_source, resolution)
+        # M1 Pro Performance Detection and Optimization
+        import platform
+        self.is_m1_mac = platform.processor() == 'arm' or 'arm64' in platform.platform().lower()
+        
+        # Auto-detect performance mode
+        if performance_mode == "auto":
+            performance_mode = "m1_optimized" if self.is_m1_mac else "gpu_optimized"
+        
+        self.performance_mode = performance_mode
+        print(f"Performance mode: {performance_mode} (M1 detected: {self.is_m1_mac})")
+        
+        # Adaptive resolution for M1 Pro
+        if performance_mode == "m1_optimized" and resolution == "1280x720":
+            resolution = "960x540"  # Reduced resolution for better performance
+            print(f"M1 Pro optimization: Using {resolution} for better performance")
+        
+        self.camera = SimpleCamera(camera_source, resolution, buffer_size=2 if self.is_m1_mac else 5)
         self.detector = AerialObjectDetector(min_confidence=0.6)
         
-        # OpenCV Dense Optical Flow Integration
-        self.flow_detector = OpenCVFlowDetector(flow_threshold=1.5)
-        self.flow_tracker = OpticalFlowTracker(max_distance=60)
-        self.enable_optical_flow = True
+        # M1-Optimized Optical Flow Settings
+        if performance_mode == "m1_optimized":
+            self.flow_detector = OpenCVFlowDetector(flow_threshold=2.0)  # Less sensitive for performance
+            self.flow_tracker = OpticalFlowTracker(max_distance=40)      # Smaller tracking distance
+            self.enable_optical_flow = False  # Disabled by default on M1
+            self.frame_skip_interval = 2      # Process every 2nd frame
+        else:
+            self.flow_detector = OpenCVFlowDetector(flow_threshold=1.5)
+            self.flow_tracker = OpticalFlowTracker(max_distance=60)
+            self.enable_optical_flow = True
+            self.frame_skip_interval = 1      # Process every frame
+        
         self.show_optical_flow = False
+        self.frame_skip_counter = 0
         
         # AERIAL-ONLY MODE: High-altitude camera detecting airborne objects only
         self.detector.min_consecutive_detections = 15   # Reduced with optical flow assistance
@@ -356,6 +382,20 @@ class AerialDetectionSystem:
             cv2.putText(frame, "AUTO-REC", (panel_x + panel_width - 88, panel_y + 28),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.35, (255, 165, 0), 2)
 
+    def draw_minimal_stats(self, frame: np.ndarray):
+        """Draw minimal stats for performance-constrained rendering"""
+        height, width = frame.shape[:2]
+        
+        # Simple performance indicator
+        validated_count = len([o for o in self.detector.tracked_objects.values() if o.is_validated])
+        perf_color = (0, 255, 0) if self.avg_process_time < 30 else (0, 255, 255) if self.avg_process_time < 50 else (0, 0, 255)
+        
+        # Top-left corner minimal info
+        cv2.putText(frame, f"TARGETS: {validated_count}", (10, 25),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+        cv2.putText(frame, f"PERF: {self.avg_process_time:.0f}ms", (10, 45),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.4, perf_color, 1)
+    
     def draw_military_hud_elements(self, frame: np.ndarray):
         """Draw military-style HUD elements"""
         height, width = frame.shape[:2]
@@ -538,20 +578,30 @@ class AerialDetectionSystem:
                     self.cleanup_old_auto_recordings()
                 
                 try:
-                    # Process frame with both brightness detection and optical flow
-                    start_time = time.time()
+                    # M1 Pro Frame Skipping Optimization
+                    self.frame_skip_counter += 1
+                    should_process_frame = (self.frame_skip_counter % self.frame_skip_interval == 0)
                     
-                    # Traditional brightness-based detection
-                    validated_objects = self.detector.process_frame(frame)
-                    
-                    # RAFT Optical Flow detection for enhanced motion detection
-                    flow_objects = []
-                    if self.enable_optical_flow:
-                        motion_objects = self.flow_detector.process_frame_pair(frame, min_area=5, max_area=200)
-                        flow_objects = self.flow_tracker.update_tracks(motion_objects)
+                    if should_process_frame:
+                        # Process frame with adaptive detection based on performance mode
+                        start_time = time.time()
                         
-                        # Merge optical flow detections with brightness detections
-                        validated_objects = self.merge_detections(validated_objects, flow_objects)
+                        # Traditional brightness-based detection
+                        validated_objects = self.detector.process_frame(frame)
+                        
+                        # Adaptive Optical Flow - only if enabled and not overloaded
+                        flow_objects = []
+                        if self.enable_optical_flow and self.avg_process_time < 50:  # Skip flow if too slow
+                            motion_objects = self.flow_detector.process_frame_pair(frame, min_area=5, max_area=200)
+                            flow_objects = self.flow_tracker.update_tracks(motion_objects)
+                            
+                            # Merge optical flow detections with brightness detections
+                            validated_objects = self.merge_detections(validated_objects, flow_objects)
+                        elif self.enable_optical_flow and self.avg_process_time >= 50:
+                            print("Optical flow temporarily disabled - performance too slow")
+                    else:
+                        # Use cached detections from previous frame for smooth display
+                        validated_objects = list(self.detector.tracked_objects.values())
                     
                     process_time = (time.time() - start_time) * 1000  # Convert to ms
                     
@@ -599,9 +649,14 @@ class AerialDetectionSystem:
                                     except:
                                         pass
                     
-                    # Draw military-style UI elements
-                    self.draw_stats_panel(frame)
-                    self.draw_military_hud_elements(frame)
+                    # Adaptive UI rendering based on performance
+                    if should_process_frame or self.avg_process_time < 30:
+                        # Full UI rendering when performance is good
+                        self.draw_stats_panel(frame)
+                        self.draw_military_hud_elements(frame)
+                    else:
+                        # Simplified UI when performance is struggling
+                        self.draw_minimal_stats(frame)
                     
                     # Draw optical flow visualization if enabled
                     if self.show_optical_flow and hasattr(self.flow_detector, 'motion_accumulator'):
@@ -817,6 +872,9 @@ def main():
                       help='Minimum confidence threshold (0.0-1.0)')
     parser.add_argument('--brightness', type=int, default=190,
                       help='Brightness threshold (100-250, lower = more sensitive)')
+    parser.add_argument('--performance', default='auto', 
+                      choices=['auto', 'high_performance', 'm1_optimized', 'gpu_optimized'],
+                      help='Performance optimization mode (auto detects M1)')
     
     args = parser.parse_args()
     
@@ -828,8 +886,8 @@ def main():
             print("Could not get YouTube stream URL. Exiting.")
             return
     
-    # Create detection system
-    system = AerialDetectionSystem(source, args.resolution)
+    # Create detection system with performance optimization
+    system = AerialDetectionSystem(source, args.resolution, args.performance)
     
     # Apply settings
     system.detector.min_confidence = args.confidence
