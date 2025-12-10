@@ -11,7 +11,7 @@ cd aodetect
 python3 main.py --source "rtsps://192.168.0.199:7441/Ep4rnzfdW2oGzpNp?enableSrtp" --brightness 220 --confidence 0.1
 ```
 ```bash
-python3 main.py --source "https://www.youtube.com/watch?v=RH5fgOcO0jg" --brightness 220 --confidence 0.1
+python3 main.py --source "https://www.youtube.com/watch?v=RH5fgOcO0jg" --brightness 220 --confidence 0.9
 ```
 https://www.youtube.com/watch?v=RH5fgOcO0jg
 

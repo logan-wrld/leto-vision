@@ -23,21 +23,10 @@ def record_rtsp_stream(rtsp_url, output_file=None, duration=None, codec='mp4v'):
         codec: Video codec to use (default: 'mp4v')
     """
     
-    # Create data directory in current directory
-    data_dir = os.path.join(os.getcwd(), "data")
-    os.makedirs(data_dir, exist_ok=True)
-    
     # Generate default output filename if not provided
     if output_file is None:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         output_file = f"recording_{timestamp}.avi"
-    
-    # Ensure output file is saved in data directory
-    if not os.path.dirname(output_file):  # If no directory specified
-        output_file = os.path.join(data_dir, output_file)
-    else:
-        # If user specified a path, create it within data directory
-        output_file = os.path.join(data_dir, os.path.basename(output_file))
     
     # Ensure output directory exists
     output_dir = os.path.dirname(output_file)
@@ -131,16 +120,14 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Record indefinitely to data/ folder (stop with Ctrl+C)
+  # Record indefinitely (stop with Ctrl+C)
   python rtsp_recorder.py "rtsps://192.168.0.199:7441/Ep4rnzfdW2oGzpNp?enableSrtp"
   
-  # Record for 60 seconds to data/ folder
+  # Record for 60 seconds
   python rtsp_recorder.py "rtsps://192.168.0.199:7441/Ep4rnzfdW2oGzpNp?enableSrtp" -d 60
   
-  # Record to specific file in data/ folder
+  # Record to specific file
   python rtsp_recorder.py "rtsps://192.168.0.199:7441/Ep4rnzfdW2oGzpNp?enableSrtp" -o my_recording.avi
-  
-Note: All recordings are automatically saved to the 'data/' folder in the current directory.
         """
     )
     
@@ -150,7 +137,7 @@ Note: All recordings are automatically saved to the 'data/' folder in the curren
     )
     parser.add_argument(
         '-o', '--output',
-        help='Output filename (default: recording_TIMESTAMP.avi) - saved to data/ folder',
+        help='Output filename (default: recording_TIMESTAMP.avi)',
         default=None
     )
     parser.add_argument(
