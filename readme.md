@@ -14,4 +14,13 @@ python3 main.py --source "https://www.youtube.com/watch?v=RH5fgOcO0jg" --brightn
 ```
 https://www.youtube.com/watch?v=RH5fgOcO0jg
 
+
+### Launching with CUDA GPU accelleration ffmpeg 
+
+```bash
+cd /home/hawat/leto-vision/aodetect
+python3 main.py --source "rtsps://192.168.0.199:7441/Ep4rnzfdW2oGzpNp?enableSrtp" \
+  --resolution 960x540 --backend ffmpeg --ffmpeg-fps 15 --hwaccel cuda \
+  --max-performance --no-ffmpeg-realtime
+```
 # RCNN Training
