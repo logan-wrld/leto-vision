@@ -131,6 +131,10 @@ class AerialDetectionSystem:
         self.videos_dir = f"{self.output_dir}/videos"
         self.logs_dir = f"{self.output_dir}/logs"
         self.screenshots_dir = f"{self.output_dir}/screenshots"
+
+        # Health tracking
+        self.read_failures = 0
+        self.overload_cooldown = 0
         
         # Ensure directories exist
         import os
@@ -669,9 +673,26 @@ class AerialDetectionSystem:
                 # Read frame
                 ret, frame = self.camera.read()
                 if not ret:
-                    print("Warning: Failed to read frame")
-                    time.sleep(0.1)
+                    self.read_failures += 1
+                    if self.read_failures % 20 == 0:
+                        print(f"Warning: Failed to read frame (consecutive {self.read_failures})")
+                    if self.read_failures >= 80:
+                        print("⚠️ Restarting camera after repeated read failures")
+                        try:
+                            self.camera.stop()
+                        except Exception:
+                            pass
+                        # Attempt restart
+                        if not self.camera.start():
+                            print("❌ Camera restart failed; exiting loop")
+                            break
+                        self.read_failures = 0
+                        time.sleep(0.2)
+                        continue
+                    time.sleep(0.05)
                     continue
+                else:
+                    self.read_failures = 0
                 
                 # ULTRA-simple frame validation
                 if frame is None or frame.size == 0:
@@ -683,6 +704,10 @@ class AerialDetectionSystem:
                         cv2.resizeWindow(window_name, frame.shape[1], frame.shape[0])
                     except Exception:
                         pass
+
+                # Minimal heartbeat overlay to verify UI is alive
+                if frame_count % 30 == 0:
+                    cv2.putText(frame, f"FC:{frame_count}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
                 
                 frame_count += 1
                 self.frame_skip_counter += 1
@@ -734,6 +759,21 @@ class AerialDetectionSystem:
                             if self.frame_skip_interval > 1:
                                 self.frame_skip_interval -= 1
                                 print(f"📈 Decreasing frame skip to every {self.frame_skip_interval} frames (avg: {self.avg_process_time:.1f}ms)")
+
+                    # Overload mitigation: temporarily disable optical flow and increase skip interval
+                    if self.avg_process_time > self.processing_budget * 2.0:
+                        if self.enable_optical_flow:
+                            print("⚠️ Overload: disabling optical flow temporarily")
+                            self.enable_optical_flow = False
+                        if self.skip_detection_frames < 8:
+                            self.skip_detection_frames = 8
+                        self.overload_cooldown = 600  # ~20s at 30fps
+                    elif self.overload_cooldown > 0:
+                        self.overload_cooldown -= 1
+                        if self.overload_cooldown == 0 and not self.enable_optical_flow:
+                            print("✅ Restoring optical flow after cooldown")
+                            self.enable_optical_flow = True
+                            self.skip_detection_frames = 5
 
                 # Always keep optical flow accumulator fresh for overlay; throttle by frame_skip_interval
                 flow_objects = []
