@@ -19,12 +19,13 @@ class HardwareStreamPlayer:
     Much smoother than OpenCV's VideoCapture for HTTP/YouTube streams.
     """
 
-    def __init__(self, source, width=1280, height=720, fps=30, hwaccel=None):
+    def __init__(self, source, width=1280, height=720, fps=30, hwaccel=None, realtime=True):
         self.source = source
         self.width = width
         self.height = height
         self.fps = fps
         self.hwaccel = hwaccel  # e.g., "cuda" for NVIDIA, "vaapi" on Intel, None for CPU
+        self.realtime = realtime  # If False, skip pacing/sleep and always return latest frame
         
         # Larger buffer for smooth playback (prevents jolts)
         self.frame_queue = queue.Queue(maxsize=60)  # ~2 seconds buffer
@@ -69,26 +70,19 @@ class HardwareStreamPlayer:
             print(f"✅ Got stream URL: {stream_url[:80]}...")
         
         # Build ffmpeg command with real-time pacing
+        # Keep flags minimal for widest ffmpeg compatibility
         input_opts = [
             '-hide_banner',
             '-loglevel', 'error',
             '-nostdin',
-            # Lower buffering and maintain timestamps
-            '-fflags', '+genpts+nobuffer',
-            '-flags', 'low_delay',
-            '-avioflags', 'direct',
-            '-thread_queue_size', '512',
+            '-fflags', '+genpts',
         ]
 
         if stream_url.startswith('rtsp'):
-            # RTSP: use TCP and timeouts; skip reconnect flags (not supported on some builds)
             input_opts += [
                 '-rtsp_transport', 'tcp',
-                '-stimeout', '5000000',  # 5s
-                '-max_delay', '500000',  # 0.5s
             ]
         else:
-            # HTTP/HTTPS: enable reconnect when supported
             input_opts += [
                 '-reconnect', '1',
                 '-reconnect_streamed', '1',
@@ -117,14 +111,40 @@ class HardwareStreamPlayer:
         
         print(f"🎬 Starting ffmpeg: {self.width}x{self.height} @ {self.fps}fps")
         
-        try:
-            self.process = subprocess.Popen(
-                cmd,
+        def launch(cmd_to_run):
+            return subprocess.Popen(
+                cmd_to_run,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 bufsize=self.width * self.height * 3 * 10  # 10 frames buffer
             )
-            
+
+        try:
+            self.process = launch(cmd)
+
+            # Quick health check
+            time.sleep(0.3)
+            if self.process.poll() is not None:
+                stderr_out = self.process.stderr.read().decode(errors='ignore') if self.process.stderr else ''
+                print("⚠️ ffmpeg exited early")
+                if stderr_out:
+                    print(f"ffmpeg stderr: {stderr_out[:400]}")
+                # Retry without hwaccel if it was requested
+                if self.hwaccel:
+                    print("Retrying without hwaccel...")
+                    safe_cmd = [x for x in cmd if x not in ['-hwaccel', self.hwaccel]]
+                    self.hwaccel = None
+                    self.process = launch(safe_cmd)
+                    time.sleep(0.3)
+                    if self.process.poll() is not None:
+                        stderr_out = self.process.stderr.read().decode(errors='ignore') if self.process.stderr else ''
+                        print("❌ ffmpeg exited early even without hwaccel")
+                        if stderr_out:
+                            print(f"ffmpeg stderr: {stderr_out[:400]}")
+                        return False
+                else:
+                    return False
+
             self.running = True
             self.start_time = time.time()
             
@@ -136,8 +156,7 @@ class HardwareStreamPlayer:
             return True
             
         except FileNotFoundError:
-            print("❌ ffmpeg not found. Please install ffmpeg:")
-            print("   brew install ffmpeg")
+            print("❌ ffmpeg not found. Please install ffmpeg")
             return False
         except Exception as e:
             print(f"❌ Error starting stream: {e}")
@@ -226,26 +245,34 @@ class HardwareStreamPlayer:
         try:
             # Wait for buffer to fill initially (prevents early jitter)
             if self.frames_displayed == 0:
-                while self.frame_queue.qsize() < 30 and self.running:
-                    time.sleep(0.05)
+                while self.frame_queue.qsize() < 10 and self.running:
+                    time.sleep(0.02)
                 print(f"📦 Buffer ready: {self.frame_queue.qsize()} frames")
             
-            frame = self.frame_queue.get(timeout=1.0)
-            self.frames_displayed += 1
-            
-            # Frame pacing - wait if we're ahead of schedule
-            expected_time = self.playback_start_time + (self.frames_displayed * self.target_frame_time)
-            current_time = time.time()
-            sleep_time = expected_time - current_time
-            
-            if sleep_time > 0:
-                time.sleep(sleep_time)
-            elif sleep_time < -0.5:
-                # We're way behind, reset timing
-                self.playback_start_time = time.time()
-                self.frames_displayed = 1
-            
-            return True, frame
+            if self.realtime:
+                frame = self.frame_queue.get(timeout=1.0)
+                self.frames_displayed += 1
+                # Frame pacing - wait if we're ahead of schedule
+                expected_time = self.playback_start_time + (self.frames_displayed * self.target_frame_time)
+                current_time = time.time()
+                sleep_time = expected_time - current_time
+                if sleep_time > 0:
+                    time.sleep(sleep_time)
+                elif sleep_time < -0.5:
+                    # We're way behind, reset timing
+                    self.playback_start_time = time.time()
+                    self.frames_displayed = 1
+                return True, frame
+            else:
+                # Non-paced mode: always return the newest frame available
+                try:
+                    while self.frame_queue.qsize() > 1:
+                        self.frame_queue.get_nowait()
+                except queue.Empty:
+                    pass
+                frame = self.frame_queue.get(timeout=1.0)
+                self.frames_displayed += 1
+                return True, frame
         except queue.Empty:
             return False, None
     

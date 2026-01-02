@@ -47,7 +47,8 @@ class AerialDetectionSystem:
             height = min(height, 540)
 
         if use_ffmpeg_player:
-            self.camera = HardwareStreamPlayer(camera_source, width, height, fps=ffmpeg_fps, hwaccel=hwaccel)
+            # For in-app playback, disable pacing to keep UI responsive
+            self.camera = HardwareStreamPlayer(camera_source, width, height, fps=ffmpeg_fps, hwaccel=hwaccel, realtime=False)
             hw_msg = f" hwaccel={hwaccel}" if hwaccel else ""
             print(f"🎬 Using ffmpeg pipe backend ({width}x{height} @ {ffmpeg_fps}fps){hw_msg}")
         else:
@@ -609,10 +610,21 @@ class AerialDetectionSystem:
         print("AERIAL OBJECT DETECTION SYSTEM v2.0")
         print("=" * 60)
         
-        # Start camera
+        # Start camera, with fallback to OpenCV backend if ffmpeg pipe fails
         if not self.camera.start():
             print("ERROR: Failed to start camera!")
-            return
+            # Fallback: try OpenCV capture as last resort
+            try:
+                fallback = SimpleCamera(self.camera_source, self.resolution, buffer_size=1)
+                if fallback.start():
+                    print("Fallback to OpenCV capture succeeded")
+                    self.camera = fallback
+                else:
+                    print("Fallback to OpenCV capture failed")
+                    return
+            except Exception as e:
+                print(f"Fallback error: {e}")
+                return
         
 
         print("  [Q] System Shutdown")
@@ -664,6 +676,13 @@ class AerialDetectionSystem:
                 # ULTRA-simple frame validation
                 if frame is None or frame.size == 0:
                     continue  # Just skip bad frames
+
+                # Keep window size synced to actual frame resolution on first frame
+                if frame_count == 1:
+                    try:
+                        cv2.resizeWindow(window_name, frame.shape[1], frame.shape[0])
+                    except Exception:
+                        pass
                 
                 frame_count += 1
                 self.frame_skip_counter += 1
@@ -715,6 +734,21 @@ class AerialDetectionSystem:
                             if self.frame_skip_interval > 1:
                                 self.frame_skip_interval -= 1
                                 print(f"📈 Decreasing frame skip to every {self.frame_skip_interval} frames (avg: {self.avg_process_time:.1f}ms)")
+
+                # Always keep optical flow accumulator fresh for overlay; throttle by frame_skip_interval
+                flow_objects = []
+                if self.enable_optical_flow:
+                    try:
+                        if self.frame_skip_counter % self.frame_skip_interval == 0:
+                            motion_objects = self.flow_detector.process_frame_pair(frame, min_area=5, max_area=200)
+                            flow_objects = self.flow_tracker.update_tracks(motion_objects)
+                    except Exception as e:
+                        if self.frame_skip_counter % 120 == 0:
+                            print(f"Optical flow error: {e}")
+                
+                # Optionally merge flow tracks into validated set
+                if flow_objects and not self.playback_only_mode:
+                    validated_objects = self.merge_detections(validated_objects, flow_objects)
                     
                     # Check for motion to trigger auto-recording
                     has_current_motion = len(validated_objects) > 0
