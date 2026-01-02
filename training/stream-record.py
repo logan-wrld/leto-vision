@@ -56,17 +56,31 @@ if __name__ == "__main__":
         print("Could not get stream URL. Exiting.")
         exit()
 
-    # FFmpeg command to read the stream and pipe raw video to stdout
+    # Build ffmpeg command to read the stream and pipe raw video to stdout
+    input_opts = [
+        '-hide_banner',
+        '-loglevel', 'error',
+        '-nostdin',
+        '-reconnect', '1',
+        '-reconnect_streamed', '1',
+        '-reconnect_delay_max', '5',
+        '-fflags', '+genpts+nobuffer',
+        '-thread_queue_size', '512',
+        '-rw_timeout', '5000000',
+    ]
+
+    if stream_url.startswith('rtsp'):
+        input_opts += ['-rtsp_transport', 'tcp', '-stimeout', '5000000', '-max_delay', '500000']
+
     ffmpeg_cmd = [
         'ffmpeg',
-        '-re',                 # Read at native frame rate
+        *input_opts,
         '-i', stream_url,
-        '-fflags', 'nobuffer', # Reduce latency
-        '-probesize', '32',    # Analyze stream quickly
         '-f', 'rawvideo',      # Output format
         '-pix_fmt', 'bgr24',   # Pixel format OpenCV likes
         '-vf', f'scale={WIDTH}:{HEIGHT}', # Scale the video
-        '-loglevel', 'error',  # Suppress verbose output
+        '-vsync', 'cfr',
+        '-r', '30',            # Pace output to 30fps for consistent playback
         '-'                    # Output to stdout
     ]
 

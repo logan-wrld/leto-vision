@@ -10,9 +10,10 @@ import sys
 import time
 from datetime import datetime
 import argparse
+import subprocess
 import os
 
-def record_rtsp_stream(rtsp_url, output_file=None, duration=None, codec='mp4v'):
+def record_rtsp_stream(rtsp_url, output_file=None, duration=None, codec='mp4v', backend='opencv'):
     """
     Record video from an RTSPS stream.
     
@@ -27,6 +28,56 @@ def record_rtsp_stream(rtsp_url, output_file=None, duration=None, codec='mp4v'):
     if output_file is None:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         output_file = f"recording_{timestamp}.avi"
+
+    backend = (backend or 'opencv').lower()
+
+    if backend == 'ffmpeg':
+        return record_rtsp_with_ffmpeg(rtsp_url, output_file, duration)
+    if backend == 'opencv':
+        return _record_rtsp_opencv(rtsp_url, output_file, duration, codec)
+
+    print(f"Error: Unknown backend '{backend}'. Use 'opencv' or 'ffmpeg'.")
+    return False
+
+
+def record_rtsp_with_ffmpeg(rtsp_url, output_file=None, duration=None):
+    """
+    Record an RTSP(S) stream using ffmpeg with stream timestamps preserved.
+    """
+    if output_file is None:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        output_file = f"recording_{timestamp}.mp4"
+
+    # Build ffmpeg command. -rtsp_transport tcp for reliability; -c copy to avoid re-encoding.
+    cmd = [
+        'ffmpeg',
+        '-rtsp_transport', 'tcp',
+        '-i', rtsp_url,
+        '-c', 'copy',
+        '-fflags', '+genpts',
+        '-use_wallclock_as_timestamps', '1'
+    ]
+
+    if duration:
+        cmd += ['-t', str(duration)]
+
+    cmd += [output_file]
+
+    print('Running ffmpeg:', ' '.join(cmd))
+
+    try:
+        # Run ffmpeg and wait for completion (or until interrupted)
+        proc = subprocess.run(cmd)
+        return proc.returncode == 0
+    except FileNotFoundError:
+        print('Error: ffmpeg not found. Install ffmpeg or use the opencv backend.')
+        return False
+
+
+def _record_rtsp_opencv(rtsp_url, output_file=None, duration=None, codec='mp4v'):
+    """
+    Original OpenCV-based recorder extracted to its own function.
+    """
     
     # Ensure output directory exists
     output_dir = os.path.dirname(output_file)
@@ -37,7 +88,7 @@ def record_rtsp_stream(rtsp_url, output_file=None, duration=None, codec='mp4v'):
     
     # Configure OpenCV to use TCP transport (more reliable for RTSP)
     os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp"
-    
+
     # Open the RTSP stream
     cap = cv2.VideoCapture(rtsp_url, cv2.CAP_FFMPEG)
     
@@ -151,6 +202,11 @@ Examples:
         help='Video codec (default: mp4v). Options: mp4v, XVID, MJPG, X264',
         default='mp4v'
     )
+    parser.add_argument(
+        '-b', '--backend',
+        help='Recording backend to use (opencv or ffmpeg). ffmpeg preserves stream timestamps better.',
+        default='opencv'
+    )
     
     args = parser.parse_args()
     
@@ -158,7 +214,8 @@ Examples:
         args.rtsp_url,
         args.output,
         args.duration,
-        args.codec
+        args.codec,
+        args.backend
     )
     
     sys.exit(0 if success else 1)

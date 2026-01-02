@@ -68,15 +68,35 @@ class HardwareStreamPlayer:
             print(f"✅ Got stream URL: {stream_url[:80]}...")
         
         # Build ffmpeg command with real-time pacing
-        cmd = [
-            'ffmpeg',
+        input_opts = [
             '-hide_banner',
             '-loglevel', 'error',
-            # Reconnect options for streams
-            '-reconnect', '1',
-            '-reconnect_streamed', '1',
-            '-reconnect_delay_max', '5',
-            # Input
+            '-nostdin',
+            # Lower buffering and maintain timestamps
+            '-fflags', '+genpts+nobuffer',
+            '-flags', 'low_delay',
+            '-avioflags', 'direct',
+            '-thread_queue_size', '512',
+        ]
+
+        if stream_url.startswith('rtsp'):
+            # RTSP: use TCP and timeouts; skip reconnect flags (not supported on some builds)
+            input_opts += [
+                '-rtsp_transport', 'tcp',
+                '-stimeout', '5000000',  # 5s
+                '-max_delay', '500000',  # 0.5s
+            ]
+        else:
+            # HTTP/HTTPS: enable reconnect when supported
+            input_opts += [
+                '-reconnect', '1',
+                '-reconnect_streamed', '1',
+                '-reconnect_delay_max', '5',
+            ]
+
+        cmd = [
+            'ffmpeg',
+            *input_opts,
             '-i', stream_url,
             # Output options - use vsync to pace output
             '-f', 'rawvideo',
