@@ -9,6 +9,7 @@ import threading
 import queue
 import time
 import numpy as np
+import os
 
 
 class SimpleCamera:
@@ -45,13 +46,17 @@ class SimpleCamera:
         self.fps = 0
         self.last_fps_time = time.time()
         self.last_fps_frame = 0
+        # Transport options
+        self.use_tcp = True
     
     def start(self):
         """Start the camera capture"""
         try:
             if self.source.startswith('rtsp'):
-                # RTSP stream
-                self.cap = cv2.VideoCapture(self.source)
+                # RTSP stream with TCP and FFMPEG backend for stability
+                if self.use_tcp:
+                    os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp|buffer_size;102400"
+                self.cap = cv2.VideoCapture(self.source, cv2.CAP_FFMPEG)
             else:
                 # Local camera or file
                 self.cap = cv2.VideoCapture(int(self.source) if self.source.isdigit() else self.source)

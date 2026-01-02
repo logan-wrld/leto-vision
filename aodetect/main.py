@@ -22,30 +22,34 @@ import subprocess
 class AerialDetectionSystem:
     """Complete aerial detection system with camera integration"""
     
-    def __init__(self, camera_source, resolution="1280x720"):
+    def __init__(self, camera_source, resolution="1280x720", backend="auto", ffmpeg_fps=30, hwaccel=None):
         """
         Initialize the detection system
         Args:
             camera_source: RTSP URL, file path, or camera index
             resolution: Camera resolution
         """
-        # Use hardware-accelerated player for YouTube/HTTP streams
+        # Parse resolution
+        if 'x' in resolution:
+            w, h = resolution.split('x')
+            width, height = int(w), int(h)
+        else:
+            width, height = 1280, 720
+
         self.is_youtube_stream = 'youtube.com' in camera_source or 'youtu.be' in camera_source or camera_source.startswith('http')
-        
+        self.is_rtsp_stream = camera_source.startswith('rtsp')
+
+        use_ffmpeg_player = backend == 'ffmpeg' or (backend == 'auto' and (self.is_youtube_stream or self.is_rtsp_stream))
+
         if self.is_youtube_stream:
-            # Parse resolution
-            if 'x' in resolution:
-                w, h = resolution.split('x')
-                width, height = int(w), int(h)
-            else:
-                width, height = 960, 540  # Default lower res for streams
-            
-            # Use reduced resolution for smooth playback
+            # Cap resolution for smoother network playback
             width = min(width, 960)
             height = min(height, 540)
-            
-            self.camera = HardwareStreamPlayer(camera_source, width, height, fps=24)
-            print(f"🎬 Using hardware-accelerated stream player")
+
+        if use_ffmpeg_player:
+            self.camera = HardwareStreamPlayer(camera_source, width, height, fps=ffmpeg_fps, hwaccel=hwaccel)
+            hw_msg = f" hwaccel={hwaccel}" if hwaccel else ""
+            print(f"🎬 Using ffmpeg pipe backend ({width}x{height} @ {ffmpeg_fps}fps){hw_msg}")
         else:
             # Ultra-minimal buffer for smoothest playback
             self.camera = SimpleCamera(camera_source, resolution, buffer_size=1)
@@ -1021,13 +1025,20 @@ def main():
                       help='Minimum confidence threshold (0.0-1.0)')
     parser.add_argument('--brightness', type=int, default=190,
                       help='Brightness threshold (100-250, lower = more sensitive)')
+    parser.add_argument('--backend', default='auto', choices=['auto', 'opencv', 'ffmpeg'],
+                      help='Video backend: auto (YouTube/RTSP use ffmpeg pipe), opencv, or ffmpeg')
+    parser.add_argument('--ffmpeg-fps', type=int, default=30,
+                      help='Target output FPS when using ffmpeg pipe backend')
+    parser.add_argument('--hwaccel', default=None,
+                      help='ffmpeg hardware acceleration (e.g., cuda, vaapi, videotoolbox); set to none to disable')
     
     args = parser.parse_args()
     
     source = args.source
     
     # Create detection system - HardwareStreamPlayer handles YouTube URLs internally
-    system = AerialDetectionSystem(source, args.resolution)
+    hwaccel = None if (args.hwaccel is None or args.hwaccel.lower() == 'none') else args.hwaccel
+    system = AerialDetectionSystem(source, args.resolution, backend=args.backend, ffmpeg_fps=args.ffmpeg_fps, hwaccel=hwaccel)
     
     # Apply settings
     system.detector.min_confidence = args.confidence

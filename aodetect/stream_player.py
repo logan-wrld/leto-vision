@@ -18,12 +18,13 @@ class HardwareStreamPlayer:
     Hardware-accelerated video stream player using ffmpeg pipe.
     Much smoother than OpenCV's VideoCapture for HTTP/YouTube streams.
     """
-    
-    def __init__(self, source, width=1280, height=720, fps=30):
+
+    def __init__(self, source, width=1280, height=720, fps=30, hwaccel=None):
         self.source = source
         self.width = width
         self.height = height
         self.fps = fps
+        self.hwaccel = hwaccel  # e.g., "cuda" for NVIDIA, "vaapi" on Intel, None for CPU
         
         # Larger buffer for smooth playback (prevents jolts)
         self.frame_queue = queue.Queue(maxsize=60)  # ~2 seconds buffer
@@ -94,9 +95,15 @@ class HardwareStreamPlayer:
                 '-reconnect_delay_max', '5',
             ]
 
+        hw_opts = []
+        if self.hwaccel:
+            # Only add if user requested; some builds lack these options
+            hw_opts = ['-hwaccel', self.hwaccel]
+
         cmd = [
             'ffmpeg',
             *input_opts,
+            *hw_opts,
             '-i', stream_url,
             # Output options - use vsync to pace output
             '-f', 'rawvideo',
@@ -271,11 +278,13 @@ def main():
     parser.add_argument('--width', type=int, default=960, help='Video width')
     parser.add_argument('--height', type=int, default=540, help='Video height')
     parser.add_argument('--fps', type=int, default=24, help='Target FPS')
+    parser.add_argument('--hwaccel', default=None,
+                        help='FFmpeg hardware accel (e.g., cuda, vaapi, videotoolbox, none)')
     
     args = parser.parse_args()
     
     # Create player
-    player = HardwareStreamPlayer(args.source, args.width, args.height, args.fps)
+    player = HardwareStreamPlayer(args.source, args.width, args.height, args.fps, hwaccel=args.hwaccel)
     
     if not player.start():
         print("Failed to start player")
