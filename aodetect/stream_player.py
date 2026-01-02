@@ -27,8 +27,8 @@ class HardwareStreamPlayer:
         self.hwaccel = hwaccel  # e.g., "cuda" for NVIDIA, "vaapi" on Intel, None for CPU
         self.realtime = realtime  # If False, skip pacing/sleep and always return latest frame
         
-        # Larger buffer for smooth playback (prevents jolts)
-        self.frame_queue = queue.Queue(maxsize=60)  # ~2 seconds buffer
+        # Smaller buffer to reduce latency/jumpiness
+        self.frame_queue = queue.Queue(maxsize=10)
         self.running = False
         self.process = None
         self.reader_thread = None
@@ -39,6 +39,8 @@ class HardwareStreamPlayer:
         self.playback_start_time = None
         self.frames_displayed = 0
         self.target_frame_time = 1.0 / fps
+        self.frames_received = 0
+        self.launch_time = None
         
     def get_youtube_url(self, youtube_url):
         """Get direct stream URL from YouTube using yt-dlp"""
@@ -147,6 +149,7 @@ class HardwareStreamPlayer:
 
             self.running = True
             self.start_time = time.time()
+            self.launch_time = self.start_time
             
             # Start reader thread
             self.reader_thread = threading.Thread(target=self._read_frames, daemon=True)
@@ -202,6 +205,7 @@ class HardwareStreamPlayer:
                     continue
                 
                 consecutive_errors = 0  # Reset on successful read
+                self.frames_received += 1
                 
                 # Convert to numpy array
                 frame = np.frombuffer(raw_frame, dtype=np.uint8).copy()
@@ -245,9 +249,21 @@ class HardwareStreamPlayer:
         try:
             # Wait for buffer to fill initially (prevents early jitter)
             if self.frames_displayed == 0:
-                while self.frame_queue.qsize() < 10 and self.running:
+                start_wait = time.time()
+                while self.frame_queue.qsize() < 5 and self.running:
+                    if time.time() - start_wait > 2.0:
+                        try:
+                            # Print any early stderr for diagnostics
+                            if self.process and self.process.stderr:
+                                err = self.process.stderr.read().decode(errors='ignore')
+                                if err:
+                                    print(f"ffmpeg stderr (startup): {err[:500]}")
+                        except Exception:
+                            pass
+                        return False, None  # give caller a chance to handle
                     time.sleep(0.02)
-                print(f"📦 Buffer ready: {self.frame_queue.qsize()} frames")
+                if self.frame_queue.qsize() > 0:
+                    print(f"📦 Buffer ready: {self.frame_queue.qsize()} frames")
             
             if self.realtime:
                 frame = self.frame_queue.get(timeout=1.0)

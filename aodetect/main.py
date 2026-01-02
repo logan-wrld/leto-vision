@@ -22,7 +22,7 @@ import subprocess
 class AerialDetectionSystem:
     """Complete aerial detection system with camera integration"""
     
-    def __init__(self, camera_source, resolution="1280x720", backend="auto", ffmpeg_fps=30, hwaccel=None):
+    def __init__(self, camera_source, resolution="1280x720", backend="auto", ffmpeg_fps=30, hwaccel=None, ffmpeg_realtime=True):
         """
         Initialize the detection system
         Args:
@@ -47,10 +47,31 @@ class AerialDetectionSystem:
             height = min(height, 540)
 
         if use_ffmpeg_player:
-            # For in-app playback, disable pacing to keep UI responsive
-            self.camera = HardwareStreamPlayer(camera_source, width, height, fps=ffmpeg_fps, hwaccel=hwaccel, realtime=False)
+            # Match the stable standalone player defaults
+            self.camera = HardwareStreamPlayer(
+                camera_source,
+                width,
+                height,
+                fps=ffmpeg_fps,
+                hwaccel=hwaccel,
+                realtime=ffmpeg_realtime
+            )
             hw_msg = f" hwaccel={hwaccel}" if hwaccel else ""
-            print(f"🎬 Using ffmpeg pipe backend ({width}x{height} @ {ffmpeg_fps}fps){hw_msg}")
+            rt_msg = " realtime" if ffmpeg_realtime else " drop-oldest"
+            print(f"🎬 Using ffmpeg pipe backend ({width}x{height} @ {ffmpeg_fps}fps){hw_msg}{rt_msg}")
+
+            # Force ultra-light display when using ffmpeg player to avoid UI stalls
+            self.playback_only_mode = True
+            self.enable_optical_flow = False
+            self.show_trails = False
+            self.show_stats = False
+            self.show_detection_boxes = False
+            self.show_debug = False
+            self.skip_detection_frames = 12
+            self.frame_skip_interval = 1
+            self.target_fps = ffmpeg_fps
+            self.frame_display_interval = 1.0 / max(1, ffmpeg_fps)
+            self.adaptive_processing = False
         else:
             # Ultra-minimal buffer for smoothest playback
             self.camera = SimpleCamera(camera_source, resolution, buffer_size=1)
@@ -135,6 +156,23 @@ class AerialDetectionSystem:
         # Health tracking
         self.read_failures = 0
         self.overload_cooldown = 0
+        self.frames_shown = 0
+        self.last_display_log = 0
+
+    def apply_max_performance_mode(self):
+        """Configure ultra-light playback to minimize stutter."""
+        self.show_trails = False
+        self.show_stats = False
+        self.show_detection_boxes = False
+        self.show_debug = False
+        self.enable_optical_flow = False
+        self.playback_only_mode = True
+        self.force_minimal_processing = True
+        self.skip_detection_frames = 12
+        self.frame_skip_interval = 2
+        self.target_fps = 20
+        self.frame_display_interval = 1.0 / self.target_fps
+        self.adaptive_processing = False
         
         # Ensure directories exist
         import os
@@ -676,16 +714,40 @@ class AerialDetectionSystem:
                     self.read_failures += 1
                     if self.read_failures % 20 == 0:
                         print(f"Warning: Failed to read frame (consecutive {self.read_failures})")
-                    if self.read_failures >= 80:
+                    if self.read_failures >= 20:
                         print("⚠️ Restarting camera after repeated read failures")
                         try:
                             self.camera.stop()
                         except Exception:
                             pass
-                        # Attempt restart
-                        if not self.camera.start():
+
+                        # If ffmpeg backend with hwaccel, drop hwaccel and retry once
+                        restarted = False
+                        if hasattr(self.camera, 'hwaccel'):
+                            try:
+                                if self.camera.hwaccel:
+                                    print("Retrying camera without hwaccel...")
+                                    self.camera.hwaccel = None
+                                if self.camera.start():
+                                    restarted = True
+                            except Exception:
+                                restarted = False
+                        if not restarted:
+                            # Attempt restart
+                            if self.camera.start():
+                                restarted = True
+                        if not restarted:
+                            # Final fallback to OpenCV capture
+                            fallback = SimpleCamera(self.camera_source, self.resolution, buffer_size=1)
+                            if fallback.start():
+                                print("Fallback to OpenCV capture succeeded")
+                                self.camera = fallback
+                                restarted = True
+
+                        if not restarted:
                             print("❌ Camera restart failed; exiting loop")
                             break
+
                         self.read_failures = 0
                         time.sleep(0.2)
                         continue
@@ -696,7 +758,9 @@ class AerialDetectionSystem:
                 
                 # ULTRA-simple frame validation
                 if frame is None or frame.size == 0:
-                    continue  # Just skip bad frames
+                    # Give the loop a brief chance to recover without restart
+                    time.sleep(0.02)
+                    continue
 
                 # Keep window size synced to actual frame resolution on first frame
                 if frame_count == 1:
@@ -705,20 +769,50 @@ class AerialDetectionSystem:
                     except Exception:
                         pass
 
+                # Save first frame to debug if display remains black
+                if frame_count == 1:
+                    try:
+                        dbg_path = f"{self.screenshots_dir}/debug_first_frame.png"
+                        cv2.imwrite(dbg_path, frame)
+                        print(f"Saved first frame to {dbg_path}")
+                    except Exception as e:
+                        print(f"Failed to save first frame: {e}")
+
                 # Minimal heartbeat overlay to verify UI is alive
                 if frame_count % 30 == 0:
                     cv2.putText(frame, f"FC:{frame_count}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+
+                # Track displayed frames and emit periodic logs
+                self.frames_shown += 1
+                now_ts = time.time()
+                if now_ts - self.last_display_log > 5:
+                    print(f"Displaying frame {self.frames_shown} size {frame.shape[1]}x{frame.shape[0]}")
+                    self.last_display_log = now_ts
                 
+                # Show the frame immediately for reliability
+                try:
+                    cv2.imshow(window_name, frame)
+                except Exception as e:
+                    print(f"Display error: {e}")
+                    try:
+                        cv2.destroyAllWindows()
+                        cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+                        cv2.resizeWindow(window_name, frame.shape[1], frame.shape[0])
+                        cv2.imshow(window_name, frame)
+                    except Exception as e2:
+                        print(f"Secondary display error: {e2}")
+                        continue
+
                 frame_count += 1
                 self.frame_skip_counter += 1
-                
+
                 # Periodic cleanup of old auto-recordings (every 1000 frames)
                 if frame_count % 1000 == 0:
                     self.cleanup_old_auto_recordings()
-                
+
                 # PLAYBACK-FIRST processing - minimal detection
                 start_time = time.time()
-                
+
                 if self.playback_only_mode:
                     # Pure playback mode - no detection at all
                     validated_objects = []
@@ -839,23 +933,10 @@ class AerialDetectionSystem:
                             
                             # Blend with original frame
                             cv2.addWeighted(frame, 0.8, motion_colored, 0.2, 0, frame)
-                    
-                    # # Draw crosshair
-                    # height, width = frame.shape[:2]
-                    # center_x, center_y = width // 2, height // 2
-                    # cv2.line(frame, (center_x - 20, center_y), (center_x + 20, center_y), (0, 255, 0), 1)
-                    # cv2.line(frame, (center_x, center_y - 20), (center_x, center_y + 20), (0, 255, 0), 1)
-                    
+
                     # Record if enabled (manual recording or auto-recording)
                     if (self.recording or self.auto_recording) and self.video_writer is not None:
                         self.video_writer.write(frame)
-                    
-                    # Simplified display for stream stability
-                    try:
-                        cv2.imshow(window_name, frame)
-                    except Exception as e:
-                        print(f"Display error: {e}")
-                        continue
                 
                 # Handle keyboard input
                 key = cv2.waitKey(1) & 0xFF
@@ -1105,6 +1186,12 @@ def main():
                       help='Target output FPS when using ffmpeg pipe backend')
     parser.add_argument('--hwaccel', default=None,
                       help='ffmpeg hardware acceleration (e.g., cuda, vaapi, videotoolbox); set to none to disable')
+    parser.add_argument('--max-performance', action='store_true',
+                      help='Disable overlays/flow and skip more frames for the smoothest playback')
+    parser.add_argument('--ffmpeg-realtime', dest='ffmpeg_realtime', action='store_true', default=True,
+                      help='Keep realtime pacing in ffmpeg player (match standalone stream_player).')
+    parser.add_argument('--no-ffmpeg-realtime', dest='ffmpeg_realtime', action='store_false',
+                      help='Disable realtime pacing (drop oldest frames instead).')
     
     args = parser.parse_args()
     
@@ -1112,7 +1199,10 @@ def main():
     
     # Create detection system - HardwareStreamPlayer handles YouTube URLs internally
     hwaccel = None if (args.hwaccel is None or args.hwaccel.lower() == 'none') else args.hwaccel
-    system = AerialDetectionSystem(source, args.resolution, backend=args.backend, ffmpeg_fps=args.ffmpeg_fps, hwaccel=hwaccel)
+    system = AerialDetectionSystem(source, args.resolution, backend=args.backend, ffmpeg_fps=args.ffmpeg_fps, hwaccel=hwaccel, ffmpeg_realtime=args.ffmpeg_realtime)
+
+    if args.max_performance:
+        system.apply_max_performance_mode()
     
     # Apply settings
     system.detector.min_confidence = args.confidence
