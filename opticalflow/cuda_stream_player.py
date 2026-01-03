@@ -178,14 +178,14 @@ class CUDAStreamPlayer:
         
         # Handle GPU->CPU transfer and scaling
         if self._actual_hwaccel == 'cuda' and not is_webcam:
-            # Scale on GPU, then download to CPU
-            vf_filters.append(f'scale_cuda={self.width}:{self.height}:format=nv12')
+            # Scale on GPU, download to CPU in nv12, then let -pix_fmt convert to bgr24
+            vf_filters.append(f'scale_cuda=w={self.width}:h={self.height}')
             vf_filters.append('hwdownload')
-            vf_filters.append('format=nv12')
+            vf_filters.append('format=nv12')  # hwdownload outputs nv12, -pix_fmt handles bgr24
         elif self._actual_hwaccel == 'vaapi' and not is_webcam:
             vf_filters.append(f'scale_vaapi=w={self.width}:h={self.height}')
             vf_filters.append('hwdownload')
-            vf_filters.append('format=nv12')
+            vf_filters.append('format=nv12')  # hwdownload outputs nv12, -pix_fmt handles bgr24
         else:
             # CPU scaling with fast algorithm
             vf_filters.append(f'scale={self.width}:{self.height}:flags=fast_bilinear')

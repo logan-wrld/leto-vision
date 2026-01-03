@@ -29,6 +29,10 @@ class AerialDetectionSystem:
             camera_source: RTSP URL, file path, or camera index
             resolution: Camera resolution
         """
+        # Store for potential camera restart
+        self.camera_source = camera_source
+        self.resolution = resolution
+        
         # Parse resolution
         if 'x' in resolution:
             w, h = resolution.split('x')
@@ -81,7 +85,7 @@ class AerialDetectionSystem:
         self.flow_detector = OpenCVFlowDetector(flow_threshold=1.5)
         self.flow_tracker = OpticalFlowTracker(max_distance=60)
         self.enable_optical_flow = True
-        self.show_optical_flow = False
+        self.show_optical_flow = False  # Initialize early before max-performance overrides
         
         # AERIAL-ONLY MODE: High-altitude camera detecting airborne objects only
         self.detector.min_consecutive_detections = 15   # Reduced with optical flow assistance
@@ -158,6 +162,11 @@ class AerialDetectionSystem:
         self.overload_cooldown = 0
         self.frames_shown = 0
         self.last_display_log = 0
+        
+        # Flow visualization optimization
+        self.flow_viz_counter = 0
+        self.flow_viz_update_interval = 15  # Update flow visualization every 15 frames
+        self.cached_flow_overlay = None
 
     def apply_max_performance_mode(self):
         """Configure ultra-light playback to minimize stutter."""
@@ -871,6 +880,7 @@ class AerialDetectionSystem:
 
                 # Always keep optical flow accumulator fresh for overlay; throttle by frame_skip_interval
                 flow_objects = []
+                # Run optical flow for detection if enabled
                 if self.enable_optical_flow:
                     try:
                         if self.frame_skip_counter % self.frame_skip_interval == 0:
@@ -879,6 +889,17 @@ class AerialDetectionSystem:
                     except Exception as e:
                         if self.frame_skip_counter % 120 == 0:
                             print(f"Optical flow error: {e}")
+                # Separately update flow visualization if enabled (heavily throttled for performance)
+                elif self.show_optical_flow:
+                    self.flow_viz_counter += 1
+                    if self.flow_viz_counter >= self.flow_viz_update_interval:
+                        self.flow_viz_counter = 0
+                        try:
+                            # Just compute flow for visualization, don't track objects
+                            self.flow_detector.process_frame_pair(frame, min_area=5, max_area=200)
+                        except Exception as e:
+                            if self.frame_skip_counter % 120 == 0:
+                                print(f"Optical flow visualization error: {e}")
                 
                 # Optionally merge flow tracks into validated set
                 if flow_objects and not self.playback_only_mode:
@@ -923,20 +944,21 @@ class AerialDetectionSystem:
                     if not self.playback_only_mode and self.frame_skip_counter % 10 == 0:  # Update UI every 10th frame only
                         self.draw_performance_indicator(frame)
                     
-                    # Draw optical flow visualization if enabled
-                    if self.show_optical_flow and hasattr(self.flow_detector, 'motion_accumulator'):
-                        if self.flow_detector.motion_accumulator is not None:
-                            # Create overlay for motion visualization
-                            motion_overlay = np.zeros_like(frame)
-                            motion_viz = (self.flow_detector.motion_accumulator * 255).astype(np.uint8)
-                            motion_colored = cv2.applyColorMap(motion_viz, cv2.COLORMAP_JET)
-                            
-                            # Blend with original frame
-                            cv2.addWeighted(frame, 0.8, motion_colored, 0.2, 0, frame)
-
                     # Record if enabled (manual recording or auto-recording)
                     if (self.recording or self.auto_recording) and self.video_writer is not None:
                         self.video_writer.write(frame)
+                
+                # Draw optical flow visualization if enabled (outside playback_only_mode so it works in max-performance)
+                if self.show_optical_flow and hasattr(self.flow_detector, 'motion_accumulator'):
+                    if self.flow_detector.motion_accumulator is not None:
+                        # Only regenerate overlay when flow data is updated
+                        if self.cached_flow_overlay is None or self.flow_viz_counter == 1:
+                            motion_viz = (self.flow_detector.motion_accumulator * 255).astype(np.uint8)
+                            self.cached_flow_overlay = cv2.applyColorMap(motion_viz, cv2.COLORMAP_JET)
+                        
+                        # Blend cached overlay with current frame (very fast)
+                        if self.cached_flow_overlay is not None and self.cached_flow_overlay.shape[:2] == frame.shape[:2]:
+                            cv2.addWeighted(frame, 0.8, self.cached_flow_overlay, 0.2, 0, frame)
                 
                 # Handle keyboard input
                 key = cv2.waitKey(1) & 0xFF
