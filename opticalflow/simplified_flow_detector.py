@@ -169,10 +169,12 @@ class FlowVisualizationSystem:
             self.cap = None
         else:
             self.player = None
-            self.cap = cv2.VideoCapture(self.source)
-            self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
-            self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
-            self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+            self.cap = self._create_opencv_capture()
+        
+        # Keep last valid frame for display continuity
+        self.last_frame = None
+        self.frame_fail_count = 0
+        self.max_frame_fails = 30  # Retry threshold before reconnect
         
         # Processing components
         self.detector = OpticalFlowDetector(flow_threshold=1.5)
@@ -188,6 +190,30 @@ class FlowVisualizationSystem:
         self.frame_times = deque(maxlen=30)
         self.overlay_cache = None
         self.overlay_counter = 0
+    
+    def _create_opencv_capture(self):
+        """Create OpenCV VideoCapture with optimal settings for RTSP/RTSPS"""
+        source = self.source
+        is_rtsp = isinstance(source, str) and source.lower().startswith(('rtsp://', 'rtsps://'))
+        
+        # Use FFMPEG backend for RTSP streams (better TLS/SRTP support)
+        if is_rtsp:
+            # Set environment variables for OpenCV's FFMPEG backend
+            import os
+            os.environ['OPENCV_FFMPEG_CAPTURE_OPTIONS'] = 'rtsp_transport;tcp|analyzeduration;1000000|fflags;nobuffer'
+            cap = cv2.VideoCapture(source, cv2.CAP_FFMPEG)
+        else:
+            cap = cv2.VideoCapture(source)
+        
+        if cap.isOpened():
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
+            cap.set(cv2.CAP_PROP_BUFFERSIZE, 2)  # Small buffer, but not 1 (too aggressive)
+            if is_rtsp:
+                # Additional RTSP optimizations
+                cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 10000)
+                cap.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, 5000)
+        return cap
     
     def draw_tracks(self, frame, tracks):
         """Draw tracked objects on frame"""
@@ -271,9 +297,9 @@ class FlowVisualizationSystem:
             if not self.player.start():
                 print("FFmpeg failed, using OpenCV...")
                 self.use_ffmpeg = False
-                self.cap = cv2.VideoCapture(self.source)
-                self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
-                self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
+                self.cap = self._create_opencv_capture()
+                if not self.cap.isOpened():
+                    print("WARNING: OpenCV VideoCapture failed to open source!")
         
         cv2.namedWindow('Optical Flow', cv2.WINDOW_NORMAL)
         cv2.resizeWindow('Optical Flow', self.width, self.height)
@@ -292,8 +318,28 @@ class FlowVisualizationSystem:
                         ret, frame = self.cap.read()
                     
                     if not ret or frame is None:
-                        time.sleep(0.01)
-                        continue
+                        self.frame_fail_count += 1
+                        # Use last valid frame for display continuity
+                        if self.last_frame is not None:
+                            frame = self.last_frame.copy()
+                        else:
+                            time.sleep(0.01)
+                            continue
+                        
+                        # Reconnect if too many failures
+                        if self.frame_fail_count > self.max_frame_fails:
+                            print(f"Too many frame failures ({self.frame_fail_count}), reconnecting...")
+                            self.frame_fail_count = 0
+                            if not self.use_ffmpeg and self.cap:
+                                self.cap.release()
+                                time.sleep(0.5)
+                                self.cap = self._create_opencv_capture()
+                    else:
+                        self.frame_fail_count = 0
+                        # Resize if needed (some backends ignore size settings)
+                        if frame.shape[1] != self.width or frame.shape[0] != self.height:
+                            frame = cv2.resize(frame, (self.width, self.height))
+                        self.last_frame = frame.copy()
                     
                     # Detect motion
                     detections = self.detector.process_frame(frame)

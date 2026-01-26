@@ -141,9 +141,12 @@ class CUDAStreamPlayer:
         
         # Webcam-specific options
         if is_webcam:
+            # Do not force an input format (e.g. 'mjpeg') here — some devices
+            # expose different pixel formats (yuyv422, mjpeg, etc.). Let ffmpeg
+            # auto-negotiate the best format for the device to improve
+            # compatibility across webcams.
             cmd.extend([
                 '-f', 'v4l2',
-                '-input_format', 'mjpeg',  # Usually faster than raw
                 '-framerate', str(self.fps),
                 '-video_size', f'{self.width}x{self.height}',
             ])
