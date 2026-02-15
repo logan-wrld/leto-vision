@@ -1,6 +1,8 @@
 # leto-vision
 
-This is an object detection system that captures video/images, uses ML models to detect aerial objects, tracks their movement via optical flow (OpenCV/RAFT), and exports detection results to JSONL logs with visual outputs
+This is an object detection system that captures video/images, uses ML models to detect aerial objects, tracks their movement via optical flow (OpenCV/RAFT), and exports detection results to JSONL logs with visual outputs. 
+
+These recordings/images are used to train a lightweight RCNN model in an effort to recursively improve the detection results. 
 
 Faster R-CNN (deep fully convolutional + region proposal networks)
 
