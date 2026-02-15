@@ -18,7 +18,7 @@ https://www.youtube.com/watch?v=RH5fgOcO0jg
 ### Launching with CUDA GPU accelleration ffmpeg 
 
 ```bash
-cd /aodetect
+cd opticalflow
 python3 simplified_flow_detector.py --record --source 'rtsps://192.168.0.199:7441/Ep4rnzfdW2oGzpNp?enableSrtp'
 ```
 
