@@ -15,6 +15,10 @@ python3 main.py --source "https://www.youtube.com/watch?v=RH5fgOcO0jg" --brightn
 https://www.youtube.com/watch?v=RH5fgOcO0jg
 
 
+
+
+The best model can be found within the `/opticalflow` folder. You can start the recognition code using the startup instructions below
+
 ### Launching with CUDA GPU accelleration ffmpeg 
 
 ```bash
