@@ -8,10 +8,179 @@ import cv2
 import numpy as np
 import time
 import argparse
+import os
+from datetime import datetime
 from collections import deque
 
 # Import the fixed CUDA stream player
 from cuda_stream_player import CUDAStreamPlayer, test_cuda_available
+
+
+class MotionRecorder:
+    """Records video clips when sustained motion is detected"""
+    
+    def __init__(self, output_dir="recordings", pre_buffer_sec=3, post_buffer_sec=5, fps=30):
+        self.output_dir = output_dir
+        self.pre_buffer_sec = pre_buffer_sec
+        self.post_buffer_sec = post_buffer_sec
+        self.target_fps = fps
+        self.actual_fps = fps  # Will be updated based on real frame timing
+        
+        # Pre-buffer stores (frame, timestamp) tuples
+        self.pre_buffer = deque(maxlen=int(pre_buffer_sec * fps))
+        
+        # Frame timing for actual FPS calculation
+        self.frame_times = deque(maxlen=60)
+        self.last_frame_time = None
+        
+        # Recording state
+        self.is_recording = False
+        self.recording_writer = None
+        self.recording_start_time = None
+        self.recording_end_time = None
+        self.current_recording_path = None
+        
+        # Ensure output directory exists
+        os.makedirs(output_dir, exist_ok=True)
+    
+    def _update_fps_estimate(self):
+        """Calculate actual FPS from frame timing"""
+        now = time.time()
+        if self.last_frame_time is not None:
+            self.frame_times.append(now - self.last_frame_time)
+        self.last_frame_time = now
+        
+        if len(self.frame_times) >= 10:
+            avg_interval = sum(self.frame_times) / len(self.frame_times)
+            if avg_interval > 0:
+                self.actual_fps = 1.0 / avg_interval
+                # Update pre-buffer size based on actual fps
+                new_maxlen = int(self.pre_buffer_sec * self.actual_fps)
+                if new_maxlen != self.pre_buffer.maxlen and new_maxlen > 0:
+                    self.pre_buffer = deque(self.pre_buffer, maxlen=new_maxlen)
+    
+    @property
+    def fps(self):
+        """Return the actual measured FPS"""
+        return self.actual_fps
+    
+    def add_frame(self, frame):
+        """Add frame to pre-buffer (always called)"""
+        self._update_fps_estimate()
+        self.pre_buffer.append(frame.copy())
+    
+    def should_trigger(self, tracks, trigger_seconds=2.0):
+        """Check if any track exceeds the trigger duration"""
+        frames_threshold = int(trigger_seconds * self.fps)
+        for track in tracks:
+            if track['track_length'] >= frames_threshold:
+                return True, track
+        return False, None
+    
+    def start_recording(self, frame_shape, trigger_track=None):
+        """Start a new recording"""
+        if self.is_recording:
+            return
+        
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.current_recording_path = os.path.join(
+            self.output_dir, f"motion_{timestamp}.mp4"
+        )
+        
+        height, width = frame_shape[:2]
+        
+        # Use measured FPS, rounded to common values for compatibility
+        write_fps = round(self.actual_fps)
+        if write_fps < 10:
+            write_fps = 15  # Minimum reasonable fps
+        elif write_fps > 60:
+            write_fps = 30  # Cap at reasonable max
+        
+        # Use H.264 codec (avc1) for better compatibility
+        fourcc = cv2.VideoWriter_fourcc(*'avc1')
+        self.recording_writer = cv2.VideoWriter(
+            self.current_recording_path, fourcc, write_fps, (width, height)
+        )
+        
+        # Fallback to mp4v if avc1 not available
+        if not self.recording_writer.isOpened():
+            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+            self.recording_writer = cv2.VideoWriter(
+                self.current_recording_path, fourcc, write_fps, (width, height)
+            )
+        
+        if not self.recording_writer.isOpened():
+            print(f"ERROR: Could not create recording file: {self.current_recording_path}")
+            return
+        
+        self.is_recording = True
+        self.recording_start_time = time.time()
+        self.recording_end_time = self.recording_start_time + self.post_buffer_sec
+        
+        # Write pre-buffer frames first
+        pre_buffer_frames = len(self.pre_buffer)
+        for buffered_frame in self.pre_buffer:
+            self.recording_writer.write(buffered_frame)
+        
+        track_info = f" (track #{trigger_track['id']}, length={trigger_track['track_length']})" if trigger_track else ""
+        print(f"\n🔴 RECORDING STARTED: {self.current_recording_path}")
+        print(f"   Trigger{track_info}")
+        print(f"   Pre-buffer: {pre_buffer_frames} frames ({pre_buffer_frames/self.actual_fps:.1f}s)")
+        print(f"   Recording at: {write_fps} fps (measured: {self.actual_fps:.1f})")
+    
+    def extend_recording(self):
+        """Extend recording duration when motion continues"""
+        if self.is_recording:
+            self.recording_end_time = time.time() + self.post_buffer_sec
+    
+    def write_frame(self, frame):
+        """Write frame if recording"""
+        if self.is_recording and self.recording_writer:
+            self.recording_writer.write(frame)
+    
+    def update(self, frame, tracks, trigger_seconds=2.0):
+        """Main update - call every frame"""
+        # Always add to pre-buffer
+        self.add_frame(frame)
+        
+        # Check for trigger
+        triggered, trigger_track = self.should_trigger(tracks, trigger_seconds)
+        
+        if triggered:
+            if not self.is_recording:
+                self.start_recording(frame.shape, trigger_track)
+            else:
+                self.extend_recording()
+        
+        # Write frame if recording
+        if self.is_recording:
+            self.write_frame(frame)
+            
+            # Check if recording should stop
+            if time.time() >= self.recording_end_time:
+                self.stop_recording()
+        
+        return self.is_recording
+    
+    def stop_recording(self):
+        """Stop current recording"""
+        if not self.is_recording:
+            return
+        
+        if self.recording_writer:
+            self.recording_writer.release()
+            self.recording_writer = None
+        
+        duration = time.time() - self.recording_start_time
+        print(f"⬛ RECORDING STOPPED: {self.current_recording_path}")
+        print(f"   Duration: {duration:.1f}s")
+        
+        self.is_recording = False
+        self.current_recording_path = None
+    
+    def cleanup(self):
+        """Clean up resources"""
+        self.stop_recording()
 
 
 class OpticalFlowDetector:
@@ -149,7 +318,8 @@ class ObjectTracker:
 class FlowVisualizationSystem:
     """Main system for optical flow visualization"""
     
-    def __init__(self, source, resolution="1280x720", hwaccel='cuda', use_ffmpeg=True):
+    def __init__(self, source, resolution="1280x720", hwaccel='cuda', use_ffmpeg=True,
+                 enable_recording=False, trigger_seconds=2.0, output_dir="recordings"):
         # Parse resolution
         self.width, self.height = map(int, resolution.split('x'))
         
@@ -179,6 +349,18 @@ class FlowVisualizationSystem:
         # Processing components
         self.detector = OpticalFlowDetector(flow_threshold=1.5)
         self.tracker = ObjectTracker(max_distance=60)
+        
+        # Recording
+        self.enable_recording = enable_recording
+        self.trigger_seconds = trigger_seconds
+        self.recorder = None
+        if enable_recording:
+            self.recorder = MotionRecorder(
+                output_dir=output_dir,
+                pre_buffer_sec=3,
+                post_buffer_sec=5,
+                fps=30
+            )
         
         # Display options
         self.show_overlay = True
@@ -241,9 +423,10 @@ class FlowVisualizationSystem:
         
         # Semi-transparent background
         overlay = frame.copy()
-        cv2.rectangle(overlay, (10, 10), (250, 140), (0, 0, 0), -1)
+        panel_height = 165 if self.enable_recording else 140
+        cv2.rectangle(overlay, (10, 10), (250, panel_height), (0, 0, 0), -1)
         cv2.addWeighted(overlay, 0.6, frame, 0.4, 0, frame)
-        cv2.rectangle(frame, (10, 10), (250, 140), (0, 255, 0), 1)
+        cv2.rectangle(frame, (10, 10), (250, panel_height), (0, 255, 0), 1)
         
         y = 30
         cv2.putText(frame, f"FPS: {self.fps:.1f}", (20, y),
@@ -270,6 +453,19 @@ class FlowVisualizationSystem:
         
         cv2.putText(frame, f"Threshold: {self.detector.flow_threshold:.1f}", (20, y),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1)
+        
+        # Recording status
+        if self.enable_recording:
+            y += 22
+            if self.recorder and self.recorder.is_recording:
+                cv2.putText(frame, "REC", (20, y),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
+                # Blinking red circle
+                if int(time.time() * 2) % 2:
+                    cv2.circle(frame, (70, y - 5), 8, (0, 0, 255), -1)
+            else:
+                cv2.putText(frame, f"Record: trigger>{self.trigger_seconds:.1f}s", (20, y),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.4, (150, 150, 150), 1)
     
     def run(self):
         """Main processing loop"""
@@ -283,12 +479,18 @@ class FlowVisualizationSystem:
             for k, v in hw.items():
                 print(f"  {'✓' if v else '✗'} {k}")
         
+        if self.enable_recording:
+            print(f"\nRecording: ENABLED")
+            print(f"  Trigger: track duration > {self.trigger_seconds}s")
+            print(f"  Output dir: {self.recorder.output_dir}")
+        
         print("\nControls:")
         print("  Q     - Quit")
         print("  O     - Toggle flow overlay")
         print("  T     - Toggle track markers")
         print("  S     - Toggle stats")
         print("  M/N   - Adjust sensitivity")
+        print("  R     - Toggle recording mode" if self.enable_recording else "")
         print("  SPACE - Pause")
         print("=" * 55)
         
@@ -345,6 +547,10 @@ class FlowVisualizationSystem:
                     detections = self.detector.process_frame(frame)
                     tracks = self.tracker.update(detections)
                     
+                    # Update recorder (if enabled)
+                    if self.enable_recording and self.recorder:
+                        self.recorder.update(frame, tracks, self.trigger_seconds)
+                    
                     # Draw flow overlay
                     if self.show_overlay and self.detector.motion_accumulator is not None:
                         self.overlay_counter += 1
@@ -394,11 +600,19 @@ class FlowVisualizationSystem:
                 elif key == ord(' '):
                     paused = not paused
                     print("PAUSED" if paused else "RUNNING")
+                elif key == ord('r') and self.enable_recording:
+                    if self.recorder and self.recorder.is_recording:
+                        self.recorder.stop_recording()
+                        print("Recording manually stopped")
+                    else:
+                        print(f"Recording armed - waiting for {self.trigger_seconds}s motion trigger")
         
         except KeyboardInterrupt:
             print("\nInterrupted")
         
         finally:
+            if self.enable_recording and self.recorder:
+                self.recorder.cleanup()
             if self.use_ffmpeg and self.player:
                 self.player.stop()
             if self.cap:
@@ -414,6 +628,11 @@ def main():
     parser.add_argument('--backend', default='ffmpeg', choices=['ffmpeg', 'opencv'])
     parser.add_argument('--hwaccel', default='cuda', help='Hardware accel: cuda, vaapi, none')
     
+    # Recording options
+    parser.add_argument('--record', action='store_true', help='Enable motion-triggered recording')
+    parser.add_argument('--trigger', type=float, default=2.0, help='Trigger recording after N seconds of continuous motion')
+    parser.add_argument('--output-dir', default='recordings', help='Directory to save recordings')
+    
     args = parser.parse_args()
     
     hwaccel = None if args.hwaccel == 'none' else args.hwaccel
@@ -422,7 +641,10 @@ def main():
         args.source,
         args.resolution,
         hwaccel=hwaccel,
-        use_ffmpeg=(args.backend == 'ffmpeg')
+        use_ffmpeg=(args.backend == 'ffmpeg'),
+        enable_recording=args.record,
+        trigger_seconds=args.trigger,
+        output_dir=args.output_dir
     )
     system.detector.flow_threshold = args.threshold
     system.run()
